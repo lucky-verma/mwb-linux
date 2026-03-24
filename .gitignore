@@ -1,0 +1,41 @@
+# Binaries
+mwb
+mwb-linux
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+
+# Build artifacts
+dist/
+*.deb
+*.rpm
+*.tar.gz
+
+# Config (contains secrets)
+config.toml
+
+# Claude
+CLAUDE.md
+.serena/
