@@ -1,11 +1,8 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="MWB Linux" width="120">
+  <img src="docs/assets/banner.png" alt="MWB Linux — Mouse Without Borders for Linux" width="800">
 </p>
 
-<h1 align="center">MWB Linux</h1>
-
 <p align="center">
-  <strong>Mouse Without Borders for Linux</strong><br>
   Share your keyboard, mouse, and clipboard seamlessly between Linux and Windows.
 </p>
 
