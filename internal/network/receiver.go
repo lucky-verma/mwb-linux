@@ -13,7 +13,7 @@ import (
 // startHeartbeat sends periodic heartbeats to keep the connection alive.
 // Windows MWB drops clients that don't send heartbeats.
 func startHeartbeat(conn *Conn, stop chan struct{}) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {

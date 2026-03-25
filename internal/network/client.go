@@ -54,6 +54,9 @@ func setupConn(raw net.Conn, securityKey, machineName string) (*Conn, error) {
 		_ = tc.SetNoDelay(true)
 		_ = tc.SetKeepAlive(true)
 		_ = tc.SetKeepAlivePeriod(10 * time.Second)
+		// Match OG MWB: 320KB send/recv buffers (default is ~16KB)
+		_ = tc.SetWriteBuffer(320 * 1024)
+		_ = tc.SetReadBuffer(320 * 1024)
 	}
 
 	enc, err := protocol.NewEncryptWriter(raw, aesKey, iv)
@@ -260,11 +263,13 @@ func (c *Conn) doHandshake(machineName string) error {
 	return fmt.Errorf("no HandshakeAck received")
 }
 
-// SendPacket marshals, stamps, and sends a packet.
+// SendPacket marshals, stamps, and sends a packet with a 500ms write deadline
+// matching OG MWB's SendTimeout to prevent stuck writes from blocking.
 func (c *Conn) SendPacket(p *protocol.Packet) error {
 	p.ID = c.nextID.Add(1)
 	buf := p.Marshal()
 	protocol.StampPacket(buf, c.magic)
+	_ = c.raw.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 	_, err := c.enc.Write(buf)
 	return err
 }
@@ -296,7 +301,13 @@ func (c *Conn) RecvPacket() (*protocol.Packet, error) {
 	return protocol.UnmarshalPacket(buf)
 }
 
-// Close closes the connection.
+// Close sends a ByeBye packet (like OG MWB) then closes the connection.
 func (c *Conn) Close() error {
+	bye := &protocol.Packet{
+		Type: protocol.ByeBye,
+		Src:  c.MachineID,
+		Des:  protocol.IDAll,
+	}
+	_ = c.SendPacket(bye) // best-effort, don't block on failure
 	return c.raw.Close()
 }
