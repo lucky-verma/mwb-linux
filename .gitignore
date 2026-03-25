@@ -8,6 +8,7 @@
 .local/
 
 # Claude / AI settings
+CLAUDE.md
 .claude/
 .serena/
 .cursor/
