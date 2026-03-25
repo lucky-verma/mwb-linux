@@ -198,11 +198,11 @@ func (c *Capturer) pollCursorEdge() {
 			if canSwitch {
 				switch c.edgeSide {
 				case "left":
-					if x <= 5 {
+					if x <= 1 {
 						switched = true
 					}
 				case "right":
-					if x >= c.screen.Width-5 {
+					if x >= c.screen.Width-1 {
 						switched = true
 					}
 				}
@@ -240,18 +240,23 @@ func (c *Capturer) pollCursorEdge() {
 				// Disable local input in X11 (synchronous — only takes ~2ms)
 				disableXinput()
 
-				// Send mouse to the matching edge position on remote (fire and forget)
+				// Send mouse burst to the entry position on remote
+				// Multiple packets help Windows MWB register the switch reliably
 				conn := c.conn
-				mouse := &protocol.Packet{
-					Type: protocol.Mouse,
-					Src:  conn.MachineID,
-					Des:  conn.RemoteID,
-				}
-				mouse.Mouse.X = entryX
-				mouse.Mouse.Y = entryY
-				mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
-				_ = conn.SendPacket(mouse)
-				_ = conn.SendPacket(mouse) // send twice for reliability
+				go func() {
+					for i := 0; i < 5; i++ {
+						mouse := &protocol.Packet{
+							Type: protocol.Mouse,
+							Src:  conn.MachineID,
+							Des:  conn.RemoteID,
+						}
+						mouse.Mouse.X = entryX
+						mouse.Mouse.Y = entryY
+						mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
+						_ = conn.SendPacket(mouse)
+						time.Sleep(5 * time.Millisecond)
+					}
+				}()
 			}
 		}
 	}
@@ -502,31 +507,30 @@ func (c *Capturer) handleRel(ev inputEvent) {
 
 	if switchBack {
 		remY := c.remoteY
-		remW := c.remoteW
 		remH := c.remoteH
 		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
 		c.active = true
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
+		c.canSwitch = false // block re-trigger until cursor moves away from edge
 		c.mu.Unlock()
+
+		// Move cursor away from edge SYNCHRONOUSLY before enabling xinput
+		var entryX int32
+		if c.edgeSide == "left" {
+			entryX = 100
+		} else {
+			entryX = c.screen.Width - 100
+		}
+		entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
+		cmd := exec.Command("xdotool", "mousemove", "--",
+			fmt.Sprintf("%d", entryX),
+			fmt.Sprintf("%d", entryY))
+		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
+		cmd.Run()
+
 		enableXinput()
 		c.mu.Lock()
-		// Place cursor at the matching edge position (not center)
-		go func() {
-			var entryX int32
-			if c.edgeSide == "left" {
-				entryX = 50 // return near left edge but not ON it
-			} else {
-				entryX = c.screen.Width - 50 // return near right edge but not ON it
-			}
-			entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
-			_ = remW // used for logging
-			cmd := exec.Command("xdotool", "mousemove", "--",
-				fmt.Sprintf("%d", entryX),
-				fmt.Sprintf("%d", entryY))
-			cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-			cmd.Run()
-		}()
 		return
 	}
 
