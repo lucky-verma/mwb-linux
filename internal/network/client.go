@@ -45,21 +45,10 @@ func getCachedKeyMaterial(securityKey string) ([]byte, []byte, uint32) {
 	return cachedAESKey, cachedIV, cachedMagic
 }
 
-// Connect establishes a TCP connection, performs IV exchange and handshake.
-func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
+// setupConn configures TCP options, creates crypto streams, exchanges IV,
+// and performs handshake on an already-established TCP connection.
+func setupConn(raw net.Conn, securityKey, machineName string) (*Conn, error) {
 	aesKey, iv, magic := getCachedKeyMaterial(securityKey)
-
-	raw, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("dial: %w", err)
-	}
-
-	ok := false
-	defer func() {
-		if !ok {
-			_ = raw.Close()
-		}
-	}()
 
 	if tc, ok := raw.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
@@ -119,8 +108,81 @@ func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Con
 		return nil, fmt.Errorf("send heartbeat: %w", err)
 	}
 
-	ok = true
 	return c, nil
+}
+
+// Connect establishes a TCP connection, performs IV exchange and handshake.
+func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
+	raw, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+
+	conn, err := setupConn(raw, securityKey, machineName)
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// ListenAndAccept starts a TCP server on the given port and sends accepted
+// connections (after handshake) to the returned channel. This allows Windows
+// MWB to connect TO us, which is faster after lock/reconnect cycles.
+func ListenAndAccept(port int, securityKey, machineName string, stop chan struct{}) chan *Conn {
+	connCh := make(chan *Conn, 1)
+
+	go func() {
+		defer close(connCh)
+		addr := fmt.Sprintf(":%d", port)
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			slog.Error("server listen failed", "addr", addr, "err", err)
+			return
+		}
+		defer ln.Close()
+		slog.Info("listening for incoming MWB connections", "port", port)
+
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+
+			// Set accept deadline so we can check stop channel periodically
+			if tl, ok := ln.(*net.TCPListener); ok {
+				_ = tl.SetDeadline(time.Now().Add(1 * time.Second))
+			}
+
+			raw, err := ln.Accept()
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					continue
+				}
+				slog.Debug("accept error", "err", err)
+				continue
+			}
+
+			slog.Info("incoming connection", "remote", raw.RemoteAddr())
+			conn, err := setupConn(raw, securityKey, machineName)
+			if err != nil {
+				slog.Error("incoming handshake failed", "err", err)
+				_ = raw.Close()
+				continue
+			}
+
+			slog.Info("incoming connection established", "remote", conn.RemoteName)
+			select {
+			case connCh <- conn:
+			case <-stop:
+				_ = conn.Close()
+				return
+			}
+		}
+	}()
+
+	return connCh
 }
 
 func (c *Conn) doHandshake(machineName string) error {
@@ -199,8 +261,6 @@ func (c *Conn) doHandshake(machineName string) error {
 }
 
 // SendPacket marshals, stamps, and sends a packet.
-// Automatically assigns an incrementing packet ID (starting at 1) to avoid
-// the server's dedup ring buffer which is zero-initialized.
 func (c *Conn) SendPacket(p *protocol.Packet) error {
 	p.ID = c.nextID.Add(1)
 	buf := p.Marshal()

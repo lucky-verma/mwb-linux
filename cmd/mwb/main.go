@@ -79,24 +79,35 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	go func() {
-		backoff := 100 * time.Millisecond
-		maxBackoff := 10 * time.Second
+	// Start TCP server to accept incoming connections from Windows MWB
+	serverStop := make(chan struct{})
+	incomingCh := network.ListenAndAccept(cfg.MessagePort(), cfg.Key, cfg.Name, serverStop)
+	defer close(serverStop)
 
+	go func() {
 		for {
+			// Race: try outbound connect AND accept inbound — first one wins
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.MessagePort())
 			slog.Info("connecting", "addr", addr)
 
-			conn, err := network.Connect(addr, cfg.Key, cfg.Name, 10*time.Second)
-			if err != nil {
-				slog.Error("connection failed", "err", err, "retry_in", backoff)
-				time.Sleep(backoff)
-				backoff = min(backoff*2, maxBackoff)
-				continue
-			}
+			connCh := make(chan *network.Conn, 1)
+			go func() {
+				c, err := network.Connect(addr, cfg.Key, cfg.Name, 10*time.Second)
+				if err != nil {
+					slog.Debug("outbound connect failed", "err", err)
+					return
+				}
+				connCh <- c
+			}()
 
-			slog.Info("connected", "remote", conn.RemoteName)
-			backoff = 1 * time.Second
+			// Wait for either outbound or inbound connection
+			var conn *network.Conn
+			select {
+			case conn = <-connCh:
+				slog.Info("connected (outbound)", "remote", conn.RemoteName)
+			case conn = <-incomingCh:
+				slog.Info("connected (inbound)", "remote", conn.RemoteName)
+			}
 
 			// Start clipboard sharing
 			display := os.Getenv("DISPLAY")
@@ -150,8 +161,7 @@ func main() {
 			}
 
 			_ = conn.Close()
-			slog.Info("disconnected, will reconnect", "in", backoff)
-			time.Sleep(backoff)
+			slog.Info("disconnected, will reconnect in 100ms")
 		}
 	}()
 
