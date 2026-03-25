@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build amd64
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o mwb-linux-amd64 ./cmd/mwb/
+
+      - name: Build arm64
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o mwb-linux-arm64 ./cmd/mwb/
+
+      - name: Build .deb (amd64)
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          mkdir -p pkg/DEBIAN
+          mkdir -p pkg/usr/local/bin
+          mkdir -p pkg/etc/udev/rules.d
+          mkdir -p pkg/usr/lib/systemd/user
+          mkdir -p pkg/usr/share/doc/mwb-linux
+
+          cp mwb-linux-amd64 pkg/usr/local/bin/mwb
+          chmod 755 pkg/usr/local/bin/mwb
+
+          cp mwb.service pkg/usr/lib/systemd/user/mwb.service
+
+          echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' > pkg/etc/udev/rules.d/99-mwb-uinput.rules
+
+          cp README.md pkg/usr/share/doc/mwb-linux/
+          cp LICENSE pkg/usr/share/doc/mwb-linux/
+
+          cat > pkg/DEBIAN/control << EOF
+          Package: mwb-linux
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: xdotool, xinput, xclip, x11-xserver-utils
+          Maintainer: Lucky Verma <lucky@thinkersloop.com>
+          Description: Mouse Without Borders for Linux
+           Share keyboard, mouse, and clipboard seamlessly between Linux and Windows.
+           Compatible with Microsoft PowerToys Mouse Without Borders.
+          Homepage: https://github.com/lucky-verma/mwb-linux
+          EOF
+
+          cat > pkg/DEBIAN/postinst << 'POSTINST'
+          #!/bin/bash
+          modprobe uinput 2>/dev/null || true
+          echo 'uinput' > /etc/modules-load.d/uinput.conf 2>/dev/null || true
+          udevadm control --reload-rules 2>/dev/null || true
+          udevadm trigger /dev/uinput 2>/dev/null || true
+          echo ""
+          echo "MWB Linux installed!"
+          echo ""
+          echo "Next steps:"
+          echo "  1. Add your user to the input group: sudo usermod -aG input \$USER"
+          echo "  2. Create config: mkdir -p ~/.config/mwb && nano ~/.config/mwb/config.toml"
+          echo "  3. Run: mwb -bidi -edge left"
+          echo ""
+          POSTINST
+          chmod 755 pkg/DEBIAN/postinst
+
+          # Fix control file indentation
+          sed -i 's/^          //' pkg/DEBIAN/control
+
+          dpkg-deb --build pkg mwb-linux_${VERSION}_amd64.deb
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            mwb-linux-amd64
+            mwb-linux-arm64
+            mwb-linux_*_amd64.deb

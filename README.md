@@ -30,7 +30,7 @@ MWB Linux is a native Linux client that connects to **Microsoft PowerToys Mouse 
 
 ```mermaid
 flowchart LR
-    A["🐧 <b>Ubuntu PC</b><br/>Razer Mouse · Wooting KB"] <-->|" 🖱️ Mouse · ⌨️ Keyboard · 📋 Clipboard "| B["🪟 <b>Windows Laptop</b><br/>Touchpad · Keyboard"]
+    A["🐧 <b>Linux PC</b><br/>Mouse · Keyboard"] <-->|" 🖱️ Mouse · ⌨️ Keyboard · 📋 Clipboard "| B["🪟 <b>Windows PC</b><br/>Mouse · Keyboard"]
 ```
 
 > Move your mouse to the screen edge — the cursor seamlessly jumps to the other machine.
@@ -60,10 +60,43 @@ No extra software needed on Windows — just PowerToys, which is already install
 
 ## Installation
 
-### Prerequisites
+### One-Line Install (Ubuntu/Debian)
 
 ```bash
-sudo apt install xdotool xinput xclip xrandr
+curl -fsSL https://raw.githubusercontent.com/lucky-verma/mwb-linux/main/scripts/install.sh | sudo bash
+```
+
+### From .deb Package
+
+Download from [Releases](https://github.com/lucky-verma/mwb-linux/releases):
+
+```bash
+# Download latest release
+wget https://github.com/lucky-verma/mwb-linux/releases/latest/download/mwb-linux_amd64.deb
+
+# Install (automatically sets up udev rules and dependencies)
+sudo dpkg -i mwb-linux_amd64.deb
+
+# Add yourself to the input group
+sudo usermod -aG input $USER
+```
+
+### From Binary
+
+```bash
+# Download binary
+wget https://github.com/lucky-verma/mwb-linux/releases/latest/download/mwb-linux-amd64
+chmod +x mwb-linux-amd64
+sudo mv mwb-linux-amd64 /usr/local/bin/mwb
+
+# Install dependencies
+sudo apt install xdotool xinput xclip
+
+# Setup permissions
+sudo bash -c 'modprobe uinput && echo uinput > /etc/modules-load.d/uinput.conf'
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-mwb-uinput.rules
+sudo udevadm control --reload-rules
+sudo usermod -aG input $USER
 ```
 
 ### From Source
@@ -75,30 +108,7 @@ make build
 sudo make install
 ```
 
-### From Release
-
-Download the latest `.deb` package from [Releases](https://github.com/lucky-verma/mwb-linux/releases):
-
-```bash
-sudo dpkg -i mwb-linux_*.deb
-```
-
-### Setup Permissions
-
-```bash
-# Load uinput module
-sudo modprobe uinput
-echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf
-
-# Set device permissions
-echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-uinput.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger /dev/uinput
-
-# Add your user to the input group
-sudo usermod -aG input $USER
-
-# Log out and back in for group changes to take effect
-```
+> **Note:** Log out and back in after installation for group changes to take effect.
 
 ## Quick Start
 

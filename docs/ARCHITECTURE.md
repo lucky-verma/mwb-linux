@@ -9,8 +9,8 @@ This is a Linux client for Microsoft PowerToys Mouse Without Borders (MWB) that 
 ```
   Ubuntu PC (Linux)                         Work Laptop (Windows)
   ┌─────────────────┐                      ┌─────────────────────┐
-  │  Razer Mouse    │──evdev──┐            │  PowerToys MWB      │
-  │  Wooting KB     │──evdev──┤            │  (Server/Host)      │
+  │  Mouse    │──evdev──┐            │  PowerToys MWB      │
+  │  Keyboard     │──evdev──┤            │  (Server/Host)      │
   │                 │         │            │                     │
   │  mwb client     │◄────────┘            │  Receiver.cs        │
   │  ┌───────────┐  │    TCP/AES-256-CBC   │  ┌───────────────┐  │
@@ -84,18 +84,18 @@ Linux                          Windows
 7. Linux cursor moves on screen
 ```
 
-### Direction: Linux → Windows (Razer Mouse)
+### Direction: Linux → Windows (Mouse)
 
 ```
 1. mwb polls cursor position via xdotool every 50ms
 2. Cursor hits left edge (x=0)
-3. mwb disables Razer in X11 via xinput (Ubuntu stops receiving input)
+3. mwb disables local device in X11 via xinput (Ubuntu stops receiving input)
 4. mwb sends burst of absolute Mouse(123) packets to server center (32767,32767)
 5. Server's Receiver.cs processes Mouse with Des==MachineID:
    - Forces desMachineID = self (self-reclaim)
    - Calls InputSimulation.SendMouse() → Win32 SendInput
    - Cursor appears on Windows
-6. mwb forwards Razer evdev events as absolute Mouse packets (0-65535 coords)
+6. mwb forwards local device evdev events as absolute Mouse packets (0-65535 coords)
 7. Virtual cursor (remoteX/remoteY) tracks position on remote
 ```
 
@@ -103,10 +103,10 @@ Linux                          Windows
 
 ```
 1. Virtual cursor remoteX reaches remoteWidth (right edge of remote)
-2. mwb re-enables Razer in X11 via xinput
+2. mwb re-enables local device in X11 via xinput
 3. mwb moves local cursor to Ubuntu center via xdotool
 4. mwb sets active=true, clears switchSent
-5. Razer mouse now controls Ubuntu again
+5. local mouse now controls Ubuntu again
 ```
 
 ## Packet Wire Format
@@ -188,7 +188,7 @@ Server sends Matrix|Hi (type 130 = 128|2) packets. We must respond with Hello to
 With "Move mouse relatively" **OFF** on the server, absolute mode avoids bounce-back issues.
 
 ### 6. xinput for Device Isolation
-When controlling the remote, `xinput disable` prevents the Razer from moving the Ubuntu cursor. `xinput enable` restores it when returning. This is more reliable than EVIOCGRAB which had issues with device restoration.
+When controlling the remote, `xinput disable` prevents the local device from moving the Ubuntu cursor. `xinput enable` restores it when returning. This is more reliable than EVIOCGRAB which had issues with device restoration.
 
 ### 7. Timing and Debouncing
 - **Edge detection cooldown**: 2 seconds between switches
