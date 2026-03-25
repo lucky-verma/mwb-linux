@@ -198,11 +198,11 @@ func (c *Capturer) pollCursorEdge() {
 			if canSwitch {
 				switch c.edgeSide {
 				case "left":
-					if x <= 0 {
+					if x <= 5 {
 						switched = true
 					}
 				case "right":
-					if x >= c.screen.Width-1 {
+					if x >= c.screen.Width-5 {
 						switched = true
 					}
 				}
