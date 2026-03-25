@@ -80,8 +80,8 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		backoff := 1 * time.Second
-		maxBackoff := 30 * time.Second
+		backoff := 100 * time.Millisecond
+		maxBackoff := 10 * time.Second
 
 		for {
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.MessagePort())

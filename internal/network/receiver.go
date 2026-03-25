@@ -5,12 +5,41 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/bketelsen/mwb/internal/protocol"
 )
 
+// startHeartbeat sends periodic heartbeats to keep the connection alive.
+// Windows MWB drops clients that don't send heartbeats.
+func startHeartbeat(conn *Conn, stop chan struct{}) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			hb := &protocol.Packet{
+				Type: protocol.HeartbeatEx,
+				Src:  conn.MachineID,
+				Des:  protocol.IDAll,
+			}
+			hb.SetMachineName(conn.LocalName)
+			if err := conn.SendPacket(hb); err != nil {
+				slog.Debug("heartbeat send failed", "err", err)
+				return
+			}
+		}
+	}
+}
+
 // ReceiveLoop reads packets from the connection and dispatches them.
 func ReceiveLoop(conn *Conn, handler *Handler) error {
+	stop := make(chan struct{})
+	go startHeartbeat(conn, stop)
+	defer close(stop)
+
 	for {
 		pkt, err := conn.RecvPacket()
 		if err != nil {

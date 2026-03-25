@@ -26,11 +26,28 @@ type Conn struct {
 	nextID     atomic.Int32
 }
 
+// Cached key material — PBKDF2 is expensive (50k iterations), only derive once.
+var (
+	cachedAESKey []byte
+	cachedIV     []byte
+	cachedMagic  uint32
+	cachedSecret string
+)
+
+func getCachedKeyMaterial(securityKey string) ([]byte, []byte, uint32) {
+	if securityKey == cachedSecret && cachedAESKey != nil {
+		return cachedAESKey, cachedIV, cachedMagic
+	}
+	cachedAESKey = protocol.DeriveKey(securityKey)
+	cachedIV = protocol.FixedIV()
+	cachedMagic = protocol.Get24BitHash(securityKey)
+	cachedSecret = securityKey
+	return cachedAESKey, cachedIV, cachedMagic
+}
+
 // Connect establishes a TCP connection, performs IV exchange and handshake.
 func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
-	aesKey := protocol.DeriveKey(securityKey)
-	iv := protocol.FixedIV()
-	magic := protocol.Get24BitHash(securityKey)
+	aesKey, iv, magic := getCachedKeyMaterial(securityKey)
 
 	raw, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
@@ -46,6 +63,8 @@ func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Con
 
 	if tc, ok := raw.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(10 * time.Second)
 	}
 
 	enc, err := protocol.NewEncryptWriter(raw, aesKey, iv)
