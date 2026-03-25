@@ -9,10 +9,13 @@ import (
 )
 
 type Config struct {
-	Host string `toml:"host"`
-	Key  string `toml:"key"`
-	Name string `toml:"name"`
-	Port int    `toml:"port"`
+	Host         string `toml:"host"`
+	Key          string `toml:"key"`
+	Name         string `toml:"name"`
+	Port         int    `toml:"port"`
+	RemoteWidth  int    `toml:"remote_width"`
+	RemoteHeight int    `toml:"remote_height"`
+	Edge         string `toml:"edge"`
 }
 
 func Load(path string) (*Config, error) {
@@ -38,6 +41,15 @@ func Load(path string) (*Config, error) {
 	}
 	if len(cfg.Name) > 15 {
 		cfg.Name = cfg.Name[:15]
+	}
+	if cfg.RemoteWidth == 0 {
+		cfg.RemoteWidth = 1920
+	}
+	if cfg.RemoteHeight == 0 {
+		cfg.RemoteHeight = 1080
+	}
+	if cfg.Edge == "" {
+		cfg.Edge = "left"
 	}
 	return &cfg, nil
 }

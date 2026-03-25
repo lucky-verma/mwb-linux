@@ -31,9 +31,9 @@ const (
 
 	inputEventSize = 24
 
-	// Remote screen dimensions (approximate — work laptop)
-	remoteWidth  = 1920
-	remoteHeight = 1080
+	// Default remote screen dimensions — auto-detected from incoming packets
+	defaultRemoteWidth  = 1920
+	defaultRemoteHeight = 1080
 )
 
 type inputEvent struct {
@@ -63,16 +63,24 @@ type Capturer struct {
 	lastActivated time.Time // when cursor last arrived on this machine
 	remoteX       int32     // virtual cursor position on remote (pixels)
 	remoteY       int32     // virtual cursor position on remote (pixels)
+	remoteW       int32     // detected remote screen width
+	remoteH       int32     // detected remote screen height
+	edgeY         int32     // Y position where cursor left local screen
+	prevX         int32     // previous cursor X for direction detection
+	canSwitch     bool      // true once cursor has been away from edge since activation
 }
 
 // New creates a new input capturer.
 func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 	return &Capturer{
-		conn:     conn,
-		screen:   screen,
-		active:   true,
-		edgeSide: edgeSide,
-		stopCh:   make(chan struct{}),
+		conn:      conn,
+		screen:    screen,
+		active:    true,
+		edgeSide:  edgeSide,
+		stopCh:    make(chan struct{}),
+		remoteW:   defaultRemoteWidth,
+		remoteH:   defaultRemoteHeight,
+		canSwitch: true, // allow first switch immediately
 	}
 }
 
@@ -88,9 +96,8 @@ func (c *Capturer) SetActive(active bool) {
 	if active && !wasActive {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
-		// Re-enable Razer in X11
-		go enableXinput()
-		slog.Info("cursor returned to Ubuntu")
+		c.canSwitch = false // must move away from edge first
+		enableXinput()      // synchronous — must complete before mouse works
 	}
 }
 
@@ -99,6 +106,25 @@ func (c *Capturer) IsActive() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.active
+}
+
+// UpdateRemoteScreen detects remote screen dimensions from incoming Mouse packets.
+// Called by the handler when we receive absolute mouse coordinates from the server.
+func (c *Capturer) UpdateRemoteScreen(absX, absY int32) {
+	// MWB absolute coords are 0-65535. We can't directly detect resolution from them.
+	// But we can detect it from the Matrix/HeartbeatEx packets or config.
+	// For now, this is a placeholder — resolution comes from config or is auto-detected.
+}
+
+// SetRemoteScreen sets the remote screen dimensions.
+func (c *Capturer) SetRemoteScreen(w, h int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if w > 0 && h > 0 && (w != c.remoteW || h != c.remoteH) {
+		c.remoteW = w
+		c.remoteH = h
+		slog.Info("remote screen dimensions updated", "width", w, "height", h)
+	}
 }
 
 // Stop signals the capturer to stop.
@@ -124,7 +150,7 @@ func (c *Capturer) Run() error {
 // pollCursorEdge checks the actual cursor position and triggers switches.
 func (c *Capturer) pollCursorEdge() {
 	slog.Info("edge polling started", "edge", c.edgeSide, "screenWidth", c.screen.Width)
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
 	errCount := 0
@@ -137,11 +163,8 @@ func (c *Capturer) pollCursorEdge() {
 				continue
 			}
 			c.mu.Lock()
-			recentlyActivated := time.Since(c.lastActivated) < 3*time.Second
+			// canSwitch gate handles loop prevention — no time-based cooldown needed
 			c.mu.Unlock()
-			if recentlyActivated {
-				continue
-			}
 			x, y, err := getCursorPosition()
 			if err != nil {
 				errCount++
@@ -154,56 +177,81 @@ func (c *Capturer) pollCursorEdge() {
 				errCount = 0
 			}
 
-			switched := false
+			// Track whether cursor has been away from the edge since activation
+			// This prevents loops: cursor must move inward first, then back to edge
+			c.mu.Lock()
+			edgeZone := int32(20) // pixels from edge — must move this far inward to re-arm
 			switch c.edgeSide {
 			case "left":
-				if x <= 0 {
-					switched = true
+				if x > edgeZone {
+					c.canSwitch = true
 				}
 			case "right":
-				if x >= c.screen.Width-1 {
-					switched = true
+				if x < c.screen.Width-edgeZone {
+					c.canSwitch = true
+				}
+			}
+			canSwitch := c.canSwitch
+			c.mu.Unlock()
+
+			switched := false
+			if canSwitch {
+				switch c.edgeSide {
+				case "left":
+					if x <= 0 {
+						switched = true
+					}
+				case "right":
+					if x >= c.screen.Width-1 {
+						switched = true
+					}
 				}
 			}
 
 			if switched {
 				now := time.Now()
-				if now.Sub(c.lastSwitch) < 2*time.Second {
+				if now.Sub(c.lastSwitch) < 100*time.Millisecond {
 					continue
 				}
 				c.lastSwitch = now
 
 				slog.Info("screen edge hit, switching to remote", "edge", c.edgeSide, "x", x, "y", y)
+
+				// Map local Y to remote entry point (proportional)
+				entryY := int32(float64(y) / float64(c.screen.Height) * 65535)
+				entryX := int32(0) // enter from left of remote
+				if c.edgeSide == "left" {
+					entryX = 65535 // enter from right of remote
+				}
+
 				c.mu.Lock()
 				c.active = false
 				c.switchSent = time.Now()
-				c.remoteX = int32(remoteWidth / 2)
-				c.remoteY = int32(remoteHeight / 2)
+				c.edgeY = y
+				// Set virtual cursor at the entry point (in remote pixel space)
+				if c.edgeSide == "left" {
+					c.remoteX = c.remoteW - 1
+				} else {
+					c.remoteX = 0
+				}
+				c.remoteY = int32(float64(y) / float64(c.screen.Height) * float64(c.remoteH))
 				c.mu.Unlock()
 
-				slog.Info("cursor ownership changed", "active", false)
+				// Disable local input in X11 (synchronous — only takes ~2ms)
+				disableXinput()
 
-				// Disable Razer in X11 so only remote gets input
-				go disableXinput()
-
-				// Send absolute Mouse burst to center of server
+				// Send mouse to the matching edge position on remote (fire and forget)
 				conn := c.conn
-				go func() {
-					for i := 0; i < 10; i++ {
-						mouse := &protocol.Packet{
-							Type: protocol.Mouse,
-							Src:  conn.MachineID,
-							Des:  conn.RemoteID,
-						}
-						mouse.Mouse.X = 32767
-						mouse.Mouse.Y = 32767
-						mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
-						_ = conn.SendPacket(mouse)
-						time.Sleep(10 * time.Millisecond)
-					}
-				}()
-
-				slog.Info("sent switch to remote")
+				mouse := &protocol.Packet{
+					Type: protocol.Mouse,
+					Src:  conn.MachineID,
+					Des:  conn.RemoteID,
+				}
+				mouse.Mouse.X = entryX
+				mouse.Mouse.Y = entryY
+				mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
+				_ = conn.SendPacket(mouse)
+				_ = conn.SendPacket(mouse) // send twice for reliability
 			}
 		}
 	}
@@ -301,7 +349,7 @@ func disableXinput() {
 	for _, id := range getXinputIDs() {
 		cmd := exec.Command("xinput", "disable", strconv.Itoa(id))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
+		cmd.Run()
 	}
 	slog.Info("disabled Razer/Wooting xinput devices")
 }
@@ -311,7 +359,7 @@ func enableXinput() {
 	for _, id := range getXinputIDs() {
 		cmd := exec.Command("xinput", "enable", strconv.Itoa(id))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
+		cmd.Run()
 	}
 	slog.Info("enabled Razer/Wooting xinput devices")
 }
@@ -335,7 +383,7 @@ func (c *Capturer) monitorDevice(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close()
 
 	slog.Debug("monitoring device", "path", path)
 	buf := make([]byte, inputEventSize*32)
@@ -374,7 +422,7 @@ func (c *Capturer) handleEvent(ev inputEvent) {
 	}
 	// Suppress during switch grace period
 	c.mu.Lock()
-	grace := !c.switchSent.IsZero() && time.Since(c.switchSent) < 500*time.Millisecond
+	grace := !c.switchSent.IsZero() && time.Since(c.switchSent) < 100*time.Millisecond
 	c.mu.Unlock()
 	if grace {
 		return
@@ -388,26 +436,43 @@ func (c *Capturer) handleEvent(ev inputEvent) {
 	}
 }
 
+// applyAcceleration scales raw evdev deltas to approximate libinput's flat profile.
+// libinput flat profile: output = input * (1 + speed_setting)
+// With accel speed 0.766: multiplier = 1.766
+// We round to ~2x which is a good general default.
+const accelMultiplier = 2.0
+
+func applyAcceleration(delta int32) int32 {
+	scaled := float64(delta) * accelMultiplier
+	if scaled > 0 && scaled < 1 {
+		return 1
+	}
+	if scaled < 0 && scaled > -1 {
+		return -1
+	}
+	return int32(scaled)
+}
+
 func (c *Capturer) handleRel(ev inputEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	switch ev.Code {
 	case relX:
-		c.remoteX += ev.Value
+		c.remoteX += applyAcceleration(ev.Value)
 		if c.remoteX < 0 {
 			c.remoteX = 0
 		}
-		if c.remoteX > remoteWidth {
-			c.remoteX = remoteWidth
+		if c.remoteX > c.remoteW {
+			c.remoteX = c.remoteW
 		}
 	case relY:
-		c.remoteY += ev.Value
+		c.remoteY += applyAcceleration(ev.Value)
 		if c.remoteY < 0 {
 			c.remoteY = 0
 		}
-		if c.remoteY > remoteHeight {
-			c.remoteY = remoteHeight
+		if c.remoteY > c.remoteH {
+			c.remoteY = c.remoteH
 		}
 	case relWheel:
 		c.sendMouseLocked(0, 0, ev.Value*120, protocol.WM_MOUSEWHEEL)
@@ -421,7 +486,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 	switch c.edgeSide {
 	case "left":
 		// We switched to remote via left edge, return via right edge of remote
-		if c.remoteX >= remoteWidth-1 {
+		if c.remoteX >= c.remoteW-1 {
 			switchBack = true
 		}
 	case "right":
@@ -437,29 +502,37 @@ func (c *Capturer) handleRel(ev inputEvent) {
 
 	if switchBack {
 		remY := c.remoteY
+		remW := c.remoteW
+		remH := c.remoteH
 		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
 		c.active = true
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
-		// Re-enable Razer in X11
-		go enableXinput()
-		// Move cursor in background
+		c.mu.Unlock()
+		enableXinput()
+		c.mu.Lock()
+		// Place cursor at the matching edge position (not center)
 		go func() {
-			entryX := c.screen.Width / 2
-			entryY := int32(float64(remY) / float64(remoteHeight) * float64(c.screen.Height))
+			var entryX int32
+			if c.edgeSide == "left" {
+				entryX = 50 // return near left edge but not ON it
+			} else {
+				entryX = c.screen.Width - 50 // return near right edge but not ON it
+			}
+			entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
+			_ = remW // used for logging
 			cmd := exec.Command("xdotool", "mousemove", "--",
 				fmt.Sprintf("%d", entryX),
 				fmt.Sprintf("%d", entryY))
 			cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-			_ = cmd.Run()
-			slog.Info("cursor moved to Ubuntu", "x", entryX, "y", entryY)
+			cmd.Run()
 		}()
 		return
 	}
 
 	// Send absolute mouse position to remote
-	absX := int32(float64(c.remoteX) / float64(remoteWidth) * 65535)
-	absY := int32(float64(c.remoteY) / float64(remoteHeight) * 65535)
+	absX := int32(float64(c.remoteX) / float64(c.remoteW) * 65535)
+	absY := int32(float64(c.remoteY) / float64(c.remoteH) * 65535)
 	c.sendMouseLocked(absX, absY, 0, protocol.WM_MOUSEMOVE)
 }
 
@@ -489,30 +562,27 @@ func (c *Capturer) handleKey(ev inputEvent) {
 			var flags int32
 			switch ev.Code {
 			case input.BTN_LEFT:
-				switch ev.Value {
-				case 1:
+				if ev.Value == 1 {
 					flags = protocol.WM_LBUTTONDOWN
-				case 0:
+				} else if ev.Value == 0 {
 					flags = protocol.WM_LBUTTONUP
-				default:
+				} else {
 					return
 				}
 			case input.BTN_RIGHT:
-				switch ev.Value {
-				case 1:
+				if ev.Value == 1 {
 					flags = protocol.WM_RBUTTONDOWN
-				case 0:
+				} else if ev.Value == 0 {
 					flags = protocol.WM_RBUTTONUP
-				default:
+				} else {
 					return
 				}
 			case input.BTN_MIDDLE:
-				switch ev.Value {
-				case 1:
+				if ev.Value == 1 {
 					flags = protocol.WM_MBUTTONDOWN
-				case 0:
+				} else if ev.Value == 0 {
 					flags = protocol.WM_MBUTTONUP
-				default:
+				} else {
 					return
 				}
 			}

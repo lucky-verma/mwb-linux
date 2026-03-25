@@ -3,6 +3,7 @@ package network
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/bketelsen/mwb/internal/input"
 	"github.com/bketelsen/mwb/internal/protocol"
@@ -34,6 +35,7 @@ type Handler struct {
 	Clipboard   ClipboardHandler // optional clipboard handler
 	OnActivated func()           // called when remote sends MachineSwitched
 	OnReclaimed func()           // called when server sends NextMachine (cursor bounced back)
+	ActivatedAt *time.Time       // when cursor last arrived — skip mouse injection briefly
 }
 
 // HandlePacket dispatches a packet to the appropriate handler.
@@ -45,6 +47,8 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		h.handleKeyboard(pkt)
 	case protocol.MachineSwitched:
 		slog.Info("MachineSwitched: cursor switched to us", "src", pkt.Src)
+		now := time.Now()
+		h.ActivatedAt = &now
 		if h.OnActivated != nil {
 			h.OnActivated()
 		}
@@ -70,9 +74,9 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 }
 
 func (h *Handler) handleMouse(pkt *protocol.Packet) {
-	slog.Debug("mouse packet received", "src", pkt.Src, "des", pkt.Des, "x", pkt.Mouse.X, "y", pkt.Mouse.Y, "flags", pkt.Mouse.DwFlags)
-	// Don't call OnActivated from Mouse — only MachineSwitched should trigger it
-	// to prevent our own outgoing burst from immediately clearing the switch lock
+	// Skip mouse injection briefly after activation to prevent rubber-banding
+	// between server-injected position and physical mouse position
+	// No injection skip — let all mouse events through for reliable operation
 	md := pkt.Mouse
 	var err error
 	switch int(md.DwFlags) {
