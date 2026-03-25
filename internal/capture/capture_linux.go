@@ -11,9 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"strconv"
 	"time"
 
 	"github.com/bketelsen/mwb/internal/input"
@@ -120,7 +120,6 @@ func (c *Capturer) Run() error {
 	}
 	return nil
 }
-
 
 // pollCursorEdge checks the actual cursor position and triggers switches.
 func (c *Capturer) pollCursorEdge() {
@@ -302,7 +301,7 @@ func disableXinput() {
 	for _, id := range getXinputIDs() {
 		cmd := exec.Command("xinput", "disable", strconv.Itoa(id))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		cmd.Run()
+		_ = cmd.Run()
 	}
 	slog.Info("disabled Razer/Wooting xinput devices")
 }
@@ -312,7 +311,7 @@ func enableXinput() {
 	for _, id := range getXinputIDs() {
 		cmd := exec.Command("xinput", "enable", strconv.Itoa(id))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		cmd.Run()
+		_ = cmd.Run()
 	}
 	slog.Info("enabled Razer/Wooting xinput devices")
 }
@@ -336,7 +335,7 @@ func (c *Capturer) monitorDevice(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	slog.Debug("monitoring device", "path", path)
 	buf := make([]byte, inputEventSize*32)
@@ -452,7 +451,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 				fmt.Sprintf("%d", entryX),
 				fmt.Sprintf("%d", entryY))
 			cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-			cmd.Run()
+			_ = cmd.Run()
 			slog.Info("cursor moved to Ubuntu", "x", entryX, "y", entryY)
 		}()
 		return
@@ -490,27 +489,30 @@ func (c *Capturer) handleKey(ev inputEvent) {
 			var flags int32
 			switch ev.Code {
 			case input.BTN_LEFT:
-				if ev.Value == 1 {
+				switch ev.Value {
+				case 1:
 					flags = protocol.WM_LBUTTONDOWN
-				} else if ev.Value == 0 {
+				case 0:
 					flags = protocol.WM_LBUTTONUP
-				} else {
+				default:
 					return
 				}
 			case input.BTN_RIGHT:
-				if ev.Value == 1 {
+				switch ev.Value {
+				case 1:
 					flags = protocol.WM_RBUTTONDOWN
-				} else if ev.Value == 0 {
+				case 0:
 					flags = protocol.WM_RBUTTONUP
-				} else {
+				default:
 					return
 				}
 			case input.BTN_MIDDLE:
-				if ev.Value == 1 {
+				switch ev.Value {
+				case 1:
 					flags = protocol.WM_MBUTTONDOWN
-				} else if ev.Value == 0 {
+				case 0:
 					flags = protocol.WM_MBUTTONUP
-				} else {
+				default:
 					return
 				}
 			}

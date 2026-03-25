@@ -23,23 +23,23 @@ import (
 )
 
 const (
-	dataSize       = 48 // bytes of clipboard data per 64-byte packet
-	pollInterval   = 1 * time.Second
-	textTypeSep    = "{4CFF57F7-BEDD-43d5-AE8F-27A61E886F2F}"
-	maxInlineSize  = 1048576 // 1 MB — max for inline TCP send
+	dataSize      = 48 // bytes of clipboard data per 64-byte packet
+	pollInterval  = 1 * time.Second
+	textTypeSep   = "{4CFF57F7-BEDD-43d5-AE8F-27A61E886F2F}"
+	maxInlineSize = 1048576 // 1 MB — max for inline TCP send
 )
 
 // Manager handles clipboard synchronization.
 type Manager struct {
-	conn       *network.Conn
-	display    string
-	lastHash   string // hash of last clipboard content we sent
-	mu         sync.Mutex
+	conn        *network.Conn
+	display     string
+	lastHash    string // hash of last clipboard content we sent
+	mu          sync.Mutex
 	recvBuf     bytes.Buffer // accumulates incoming clipboard chunks
 	receiving   bool
 	recvIsImage bool
 	justSet     time.Time // when we last set clipboard from remote — suppress re-send
-	stopCh     chan struct{}
+	stopCh      chan struct{}
 }
 
 // NewManager creates a clipboard manager.
@@ -145,13 +145,10 @@ func (m *Manager) sendClipboard() {
 
 // sendText sends text to the remote via ClipboardText packets.
 func (m *Manager) sendText(text string) {
-	// Encode as UTF-16LE (Windows format)
-	utf16 := encodeUTF16LE(text)
-
 	// Prepend format marker: "TXT" + text
 	// MWB uses multi-format with GUID separator, but for simplicity we just send TXT
 	markedText := "TXT" + text
-	utf16 = encodeUTF16LE(markedText)
+	utf16 := encodeUTF16LE(markedText)
 
 	// Deflate compress
 	compressed, err := deflateCompress(utf16)
@@ -447,10 +444,10 @@ func encodeUTF16LE(s string) []byte {
 			r -= 0x10000
 			hi := uint16(0xD800 + (r>>10)&0x3FF)
 			lo := uint16(0xDC00 + r&0x3FF)
-			binary.Write(&buf, binary.LittleEndian, hi)
-			binary.Write(&buf, binary.LittleEndian, lo)
+			_ = binary.Write(&buf, binary.LittleEndian, hi)
+			_ = binary.Write(&buf, binary.LittleEndian, lo)
 		} else {
-			binary.Write(&buf, binary.LittleEndian, uint16(r))
+			_ = binary.Write(&buf, binary.LittleEndian, uint16(r))
 		}
 	}
 	return buf.Bytes()
@@ -501,7 +498,7 @@ func deflateCompress(data []byte) ([]byte, error) {
 // deflateDecompress decompresses Deflate data.
 func deflateDecompress(data []byte) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(data))
-	defer r.Close()
+	defer r.Close() //nolint:errcheck
 	return io.ReadAll(r)
 }
 

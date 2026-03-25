@@ -126,7 +126,7 @@ func main() {
 					cap.SetActive(true)
 					// Move cursor to center so it doesn't immediately re-trigger edge
 					go func() {
-						exec.Command("xdotool", "mousemove", "--",
+						_ = exec.Command("xdotool", "mousemove", "--",
 							fmt.Sprintf("%d", screen.Width/2),
 							fmt.Sprintf("%d", screen.Height/2)).Run()
 					}()

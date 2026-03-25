@@ -21,8 +21,8 @@ func GetScreenSizeXrandr() ScreenInfo {
 				parts := strings.SplitN(fields[0], "x", 2)
 				if len(parts) == 2 {
 					var w, h int32
-					fmt.Sscanf(parts[0], "%d", &w)
-					fmt.Sscanf(parts[1], "%d", &h)
+					_, _ = fmt.Sscanf(parts[0], "%d", &w)
+					_, _ = fmt.Sscanf(parts[1], "%d", &h)
 					if w > 0 && h > 0 {
 						return ScreenInfo{Width: w, Height: h}
 					}
