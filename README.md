@@ -28,16 +28,24 @@
 
 MWB Linux is a native Linux client that connects to **Microsoft PowerToys Mouse Without Borders** on Windows. Move your mouse to the edge of the screen, and it seamlessly jumps to the other machine — along with your keyboard and clipboard.
 
+```mermaid
+graph LR
+    subgraph Ubuntu["🐧 Ubuntu PC"]
+        A1[Razer Mouse]
+        A2[Wooting Keyboard]
+    end
+    subgraph Windows["🪟 Windows Laptop"]
+        B1[Touchpad]
+        B2[Keyboard]
+    end
+    Ubuntu -- "🖱️ Mouse + ⌨️ Keyboard + 📋 Clipboard" --> Windows
+    Windows -- "🖱️ Mouse + ⌨️ Keyboard + 📋 Clipboard" --> Ubuntu
+
+    style Ubuntu fill:#2d1b69,stroke:#0078D4,stroke-width:2px,color:#fff
+    style Windows fill:#1a3a5c,stroke:#0078D4,stroke-width:2px,color:#fff
 ```
-┌─────────────────┐         ┌─────────────────┐
-│   Ubuntu PC     │ ──────► │  Windows Laptop  │
-│                 │         │                  │
-│  Razer Mouse    │ Mouse   │  Touchpad        │
-│  Wooting KB     │ ◄────── │  Keyboard        │
-│                 │ KB+Clip │                  │
-└─────────────────┘         └─────────────────┘
-       Move mouse to edge → cursor jumps across
-```
+
+> **Move your mouse to the screen edge** — cursor seamlessly jumps to the other machine.
 
 No extra software needed on Windows — just PowerToys, which is already installed on millions of machines.
 
