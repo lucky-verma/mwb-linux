@@ -76,8 +76,9 @@ jobs:
           POSTINST
           chmod 755 pkg/DEBIAN/postinst
 
-          # Fix control file indentation
+          # Fix heredoc indentation
           sed -i 's/^          //' pkg/DEBIAN/control
+          sed -i 's/^          //' pkg/DEBIAN/postinst
 
           dpkg-deb --build pkg mwb-linux_${VERSION}_amd64.deb
 
