@@ -1,0 +1,13 @@
+[Unit]
+Description=Mouse Without Borders Linux client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mwb
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

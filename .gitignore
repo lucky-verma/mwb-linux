@@ -1,0 +1,27 @@
+# Built binary
+/mwb
+
+# GoReleaser output
+/dist/
+
+# Local-only (personal notes, scratch, working docs)
+.local/
+
+# Claude / AI settings
+CLAUDE.md
+.claude/
+.serena/
+.cursor/
+
+# Local config with secrets
+*.local.toml
+config.toml
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+*.key
+*.pem
