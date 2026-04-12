@@ -96,18 +96,23 @@ func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 // SetActive sets whether this machine currently owns the cursor.
 func (c *Capturer) SetActive(active bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.active != active {
 		slog.Info("cursor ownership changed", "active", active)
 	}
 	wasActive := c.active
 	c.active = active
-	if active && !wasActive {
+	shouldEnable := active && !wasActive
+	if shouldEnable {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
 		c.canSwitch = false // must move away from local edge before next outbound switch
 		c.canReturn = false // must move away from remote edge before next return switch
-		c.enableXinput()    // synchronous — must complete before mouse works
+	}
+	c.mu.Unlock()
+	// enableXinput acquires c.mu internally — must be called after unlock.
+	// Calling it under the lock caused a deadlock that froze all goroutines.
+	if shouldEnable {
+		c.enableXinput()
 	}
 }
 
