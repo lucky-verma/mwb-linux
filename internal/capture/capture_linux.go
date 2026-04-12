@@ -298,7 +298,9 @@ func getDisplay() string {
 
 	cachedDisplay = d
 	// Set in process environment so all child commands (xrandr, xdotool, xinput, xclip) inherit it
-	os.Setenv("DISPLAY", d)
+	if err := os.Setenv("DISPLAY", d); err != nil {
+		slog.Warn("failed to set DISPLAY env", "err", err)
+	}
 	slog.Info("X11 display detected", "display", d)
 
 	// Also ensure XAUTHORITY is set — xdotool/xinput/xclip need it when running as root
@@ -362,8 +364,11 @@ func detectAndSetXauthority(display string) {
 		}
 		for _, path := range candidates {
 			if _, err := os.Stat(path); err == nil {
-				os.Setenv("XAUTHORITY", path)
-				slog.Info("XAUTHORITY auto-detected", "path", path)
+				if err := os.Setenv("XAUTHORITY", path); err != nil {
+					slog.Warn("failed to set XAUTHORITY env", "err", err)
+				} else {
+					slog.Info("XAUTHORITY auto-detected", "path", path)
+				}
 				return
 			}
 		}
@@ -372,8 +377,11 @@ func detectAndSetXauthority(display string) {
 	if home := os.Getenv("HOME"); home != "" {
 		path := filepath.Join(home, ".Xauthority")
 		if _, err := os.Stat(path); err == nil {
-			os.Setenv("XAUTHORITY", path)
-			slog.Info("XAUTHORITY auto-detected", "path", path)
+			if err := os.Setenv("XAUTHORITY", path); err != nil {
+				slog.Warn("failed to set XAUTHORITY env", "err", err)
+			} else {
+				slog.Info("XAUTHORITY auto-detected", "path", path)
+			}
 		}
 	}
 }
