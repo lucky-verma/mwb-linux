@@ -41,21 +41,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.3.0] - 2026-03-25
 
 ### Added
+- **Dual-mode connection**: mwb now listens for incoming connections from Windows
+  AND simultaneously tries outbound connect — first one wins. Enables instant
+  reconnect after Windows lock/unlock cycles instead of waiting ~16s for Windows
+  to start listening again.
+- **Proactive heartbeats**: Send `HeartbeatEx` every 5s to prevent Windows MWB
+  from silently dropping the connection.
+- **TCP keep-alive**: 10s interval prevents NAT/firewall timeouts on idle
+  connections.
+- **Faster reconnect**: Backoff reduced from 1s–30s to 100ms–10s.
+
+### Changed
+- **Instant edge switching**: Replaced the 2s debounce timer with a `canSwitch`
+  gate — switch fires the moment the cursor hits the edge, not after a delay.
+- **Y-position matching**: Cursor enters the remote screen at a proportionally
+  matched Y coordinate instead of screen center.
+- **Correct entry edge**: Cursor enters from the right edge of Windows when
+  coming from the left edge of Ubuntu (was entering from center).
+- **Mouse acceleration**: 2× multiplier applied to evdev deltas for natural
+  remote cursor movement speed.
+- **Polling rate**: Increased from 50ms to 10ms for more responsive edge
+  detection.
+- **Grace period**: Reduced from 500ms to 100ms for faster transitions.
+- **PBKDF2 key derivation cached** across reconnects (50k iterations is
+  expensive — now only runs once per security key).
+
+### Fixed
+- Freeze on return: synchronous `xinput disable/enable` + cursor reposition
+  prevents Ubuntu cursor from moving during Windows control.
+- Edge trigger zone widened to 5px for more reliable activation.
+- CI lint errors resolved; macOS removed from test matrix (Linux-only project).
+
+## [0.1.0] - 2026-03-24
+
+### Added
 - Initial public release: native Linux client for Microsoft PowerToys Mouse
   Without Borders.
 - Bidirectional mouse, keyboard, and clipboard sharing between Linux and Windows.
 - AES-256-CBC encrypted protocol, fully compatible with PowerToys MWB.
-- Edge detection via `xdotool` cursor polling at 10ms interval.
-- `canSwitch` gate: cursor must move 20px away from local edge before re-arming.
-- Synchronous `xdotool mousemove` + `xinput disable/enable` for clean transitions.
-- 5-packet mouse burst on switch for reliable Windows MWB registration.
-- Y-position proportional mapping between screens on switch.
-- Clipboard sync (text + images) both directions via `xclip`/`xsel`.
+- Device isolation via `xinput disable/enable` to prevent local cursor movement
+  while controlling Windows.
+- Text and image clipboard sync both directions via `xclip`/`xsel`.
 - Ctrl+Alt+Right hotkey to force-return to Ubuntu if stuck.
 - Systemd user service with auto-restart.
 - `scripts/install.sh` one-command installer.
-- `.deb` package built and published on tagged releases via GitHub Actions.
+- GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
 [Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.1...HEAD
 [0.3.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/lucky-verma/mwb-linux/releases/tag/v0.3.0
+[0.3.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.1.0...v0.3.0
+[0.1.0]: https://github.com/lucky-verma/mwb-linux/releases/tag/v0.1.0
