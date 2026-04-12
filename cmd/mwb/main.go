@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -97,7 +98,12 @@ func main() {
 					slog.Debug("outbound connect failed", "err", err)
 					return
 				}
-				connCh <- c
+				// Non-blocking send: if inbound already won the race, close this conn
+				select {
+				case connCh <- c:
+				default:
+					_ = c.Close()
+				}
 			}()
 
 			// Wait for either outbound or inbound connection
@@ -133,7 +139,9 @@ func main() {
 					cap.SetActive(true)
 					// Move cursor to center so it doesn't immediately re-trigger edge
 					go func() {
-						_ = exec.Command("xdotool", "mousemove", "--",
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						defer cancel()
+						_ = exec.CommandContext(ctx, "xdotool", "mousemove", "--",
 							fmt.Sprintf("%d", screen.Width/2),
 							fmt.Sprintf("%d", screen.Height/2)).Run()
 					}()
@@ -150,11 +158,12 @@ func main() {
 				slog.Error("receive loop error", "err", err)
 			}
 
-			clipMgr.Stop()
-
+			// Stop capture first — prevents in-flight SendPacket after conn.Close()
 			if cap != nil {
 				cap.Stop()
 			}
+
+			clipMgr.Stop() // waits for goroutine via WaitGroup
 
 			_ = conn.Close()
 			slog.Info("disconnected, will reconnect in 100ms")

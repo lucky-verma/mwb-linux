@@ -258,9 +258,11 @@ func CreateVirtualKeyboard(name string) (*VirtualKeyboard, error) {
 		return nil, fmt.Errorf("UI_SET_EVBIT: %w", err)
 	}
 
-	for i := uintptr(1); i <= uintptr(KEY_MAX); i++ {
-		if err := ioctl(fd, uiSetKeyBit, i); err != nil {
-			return nil, fmt.Errorf("UI_SET_KEYBIT %d: %w", i, err)
+	// Register only the key codes this package actually uses.
+	// Avoids 767 ioctl syscalls (KEY_MAX) when the keymap tops out at ~127.
+	for _, code := range usedKeyCodes() {
+		if err := ioctl(fd, uiSetKeyBit, uintptr(code)); err != nil {
+			return nil, fmt.Errorf("UI_SET_KEYBIT %d: %w", code, err)
 		}
 	}
 

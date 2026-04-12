@@ -74,9 +74,6 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 }
 
 func (h *Handler) handleMouse(pkt *protocol.Packet) {
-	// Skip mouse injection briefly after activation to prevent rubber-banding
-	// between server-injected position and physical mouse position
-	// No injection skip — let all mouse events through for reliable operation
 	md := pkt.Mouse
 	var err error
 	switch int(md.DwFlags) {

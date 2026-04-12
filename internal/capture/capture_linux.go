@@ -5,6 +5,7 @@
 package capture
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -66,10 +67,11 @@ type Capturer struct {
 	remoteW       int32     // detected remote screen width
 	remoteH       int32     // detected remote screen height
 	edgeY         int32     // Y position where cursor left local screen
-	canSwitch     bool      // true once cursor has been away from edge since activation
-	canReturn     bool      // true once cursor has moved away from the remote return edge
-	hotkeyCtrl    bool      // tracks Ctrl key state for hotkey detection
-	hotkeyAlt     bool      // tracks Alt key state for hotkey detection
+	canSwitch         bool  // true once cursor has been away from edge since activation
+	canReturn         bool  // true once cursor has moved away from the remote return edge
+	hotkeyCtrl        bool  // tracks Ctrl key state for hotkey detection
+	hotkeyAlt         bool  // tracks Alt key state for hotkey detection
+	disabledXinputIDs []int // device IDs we disabled — re-enable same set to avoid TOCTOU
 }
 
 // New creates a new input capturer.
@@ -77,8 +79,7 @@ type Capturer struct {
 // reconnect cycle where xinput may have been left disabled (e.g. connection
 // dropped while cursor was on the Windows screen).
 func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
-	enableXinput()
-	return &Capturer{
+	c := &Capturer{
 		conn:      conn,
 		screen:    screen,
 		active:    true,
@@ -88,23 +89,30 @@ func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 		remoteH:   defaultRemoteHeight,
 		canSwitch: true, // allow first switch immediately
 	}
+	c.enableXinput() // ensure devices are re-enabled after reconnect
+	return c
 }
 
 // SetActive sets whether this machine currently owns the cursor.
 func (c *Capturer) SetActive(active bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.active != active {
 		slog.Info("cursor ownership changed", "active", active)
 	}
 	wasActive := c.active
 	c.active = active
-	if active && !wasActive {
+	shouldEnable := active && !wasActive
+	if shouldEnable {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
 		c.canSwitch = false // must move away from local edge before next outbound switch
 		c.canReturn = false // must move away from remote edge before next return switch
-		enableXinput()      // synchronous — must complete before mouse works
+	}
+	c.mu.Unlock()
+	// enableXinput acquires c.mu internally — must be called after unlock.
+	// Calling it under the lock caused a deadlock that froze all goroutines.
+	if shouldEnable {
+		c.enableXinput()
 	}
 }
 
@@ -140,14 +148,15 @@ func (c *Capturer) Stop() {
 }
 
 // Run starts edge detection polling and evdev monitoring.
+// Validates all preconditions before starting any goroutines.
 func (c *Capturer) Run() error {
-	go c.pollCursorEdge()
-
 	devices, err := findInputDevices()
 	if err != nil {
 		return fmt.Errorf("find input devices: %w", err)
 	}
 	slog.Info("found input devices", "count", len(devices))
+
+	go c.pollCursorEdge()
 	for _, d := range devices {
 		go c.monitorDevice(d)
 	}
@@ -226,9 +235,14 @@ func (c *Capturer) pollCursorEdge() {
 
 				// Map local Y to remote entry point (proportional)
 				entryY := int32(float64(y) / float64(c.screen.Height) * 65535)
-				entryX := int32(0) // enter from left of remote
+				// Enter 200px inside the remote screen, not at the literal edge.
+				// Entering at exactly 0 or 65535 triggers Windows MWB's own edge
+				// detection immediately, bouncing the cursor straight back.
+				// 200px margin ≈ 200/1920 * 65535 ≈ 6826 units from the edge.
+				const edgeMargin = int32(6826)
+				entryX := edgeMargin // enter from left of remote, slightly inside
 				if c.edgeSide == "left" {
-					entryX = 65535 // enter from right of remote
+					entryX = 65535 - edgeMargin // enter from right of remote, slightly inside
 				}
 
 				c.mu.Lock()
@@ -247,7 +261,7 @@ func (c *Capturer) pollCursorEdge() {
 				c.mu.Unlock()
 
 				// Disable local input in X11 (synchronous — only takes ~2ms)
-				disableXinput()
+				c.disableXinput()
 
 				// Send mouse burst to the entry position on remote
 				// Multiple packets help Windows MWB register the switch reliably
@@ -400,41 +414,42 @@ func detectAndSetXauthority(display string) {
 }
 
 func getCursorPosition() (x, y int32, err error) {
-	cmd := exec.Command("xdotool", "getmouselocation")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "xdotool", "getmouselocation")
 	cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, 0, fmt.Errorf("xdotool: %w", err)
+		return -1, -1, fmt.Errorf("xdotool: %w", err)
 	}
 	var ix, iy int
-	_, err = fmt.Sscanf(string(out), "x:%d y:%d", &ix, &iy)
-	if err != nil {
-		return 0, 0, err
+	if _, err = fmt.Sscanf(string(out), "x:%d y:%d", &ix, &iy); err != nil {
+		// Return sentinel -1,-1 to distinguish parse failure from cursor at origin (0,0)
+		return -1, -1, fmt.Errorf("xdotool parse: %w", err)
 	}
 	return int32(ix), int32(iy), nil
 }
 
 // getXinputIDs finds xinput device IDs for Razer/Wooting devices.
 func getXinputIDs() []int {
-	cmd := exec.Command("xinput", "list", "--id-only")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "xinput", "list")
 	cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
-
-	// Get full list with names to match
-	cmd2 := exec.Command("xinput", "list")
-	cmd2.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-	out2, _ := cmd2.Output()
-	lines := strings.Split(string(out2), "\n")
-
-	_ = out
 	var ids []int
-	for _, line := range lines {
+	for _, line := range strings.Split(string(out), "\n") {
 		lower := strings.ToLower(line)
+		// Only manage attached slaves (↳ prefix) — skip floating slaves (∼ prefix).
+		// Floating slaves are already detached from the master and don't inject
+		// events into X11; disabling them serves no purpose and breaks re-enable.
+		if strings.Contains(line, "[floating slave]") {
+			continue
+		}
 		if strings.Contains(lower, "razer") || strings.Contains(lower, "wooting") {
-			// Extract id=N
 			if idx := strings.Index(line, "id="); idx >= 0 {
 				numStr := ""
 				for _, ch := range line[idx+3:] {
@@ -453,24 +468,41 @@ func getXinputIDs() []int {
 	return ids
 }
 
-// disableXinput disables Razer/Wooting devices in X11 so only we get events.
-func disableXinput() {
-	for _, id := range getXinputIDs() {
-		cmd := exec.Command("xinput", "disable", strconv.Itoa(id))
+// disableXinput disables Razer/Wooting devices and caches which IDs were disabled
+// so enableXinput re-enables the exact same set (avoids TOCTOU if devices change).
+func (c *Capturer) disableXinput() {
+	ids := getXinputIDs()
+	c.mu.Lock()
+	c.disabledXinputIDs = ids
+	c.mu.Unlock()
+	for _, id := range ids {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cmd := exec.CommandContext(ctx, "xinput", "disable", strconv.Itoa(id))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
 		_ = cmd.Run()
+		cancel()
 	}
-	slog.Info("disabled Razer/Wooting xinput devices")
+	slog.Info("disabled Razer/Wooting xinput devices", "count", len(ids))
 }
 
-// enableXinput re-enables Razer/Wooting devices in X11.
-func enableXinput() {
-	for _, id := range getXinputIDs() {
-		cmd := exec.Command("xinput", "enable", strconv.Itoa(id))
+// enableXinput re-enables the exact device IDs that were disabled by disableXinput.
+func (c *Capturer) enableXinput() {
+	c.mu.Lock()
+	ids := c.disabledXinputIDs
+	c.disabledXinputIDs = nil
+	c.mu.Unlock()
+	if len(ids) == 0 {
+		// No cached IDs — fall back to current device list (e.g. first call from New())
+		ids = getXinputIDs()
+	}
+	for _, id := range ids {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cmd := exec.CommandContext(ctx, "xinput", "enable", strconv.Itoa(id))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
 		_ = cmd.Run()
+		cancel()
 	}
-	slog.Info("enabled Razer/Wooting xinput devices")
+	slog.Info("enabled Razer/Wooting xinput devices", "count", len(ids))
 }
 
 func findInputDevices() ([]string, error) {
@@ -643,13 +675,15 @@ func (c *Capturer) handleRel(ev inputEvent) {
 			entryX = c.screen.Width - 100
 		}
 		entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
-		cmd := exec.Command("xdotool", "mousemove", "--",
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
 			fmt.Sprintf("%d", entryX),
 			fmt.Sprintf("%d", entryY))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
 		_ = cmd.Run()
+		cancel()
 
-		enableXinput()
+		c.enableXinput()
 		c.mu.Lock()
 		return
 	}
