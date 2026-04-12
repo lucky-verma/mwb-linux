@@ -5,6 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# DISPLAY and XAUTHORITY are auto-detected by the mwb binary at startup.
+# Override here only if auto-detection fails for your setup.
+# Environment=DISPLAY=:1
+# Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
 ExecStart=/usr/local/bin/mwb -bidi -edge left
 Restart=on-failure
 RestartSec=5

@@ -77,7 +77,7 @@ Type=simple
 ExecStart=/usr/local/bin/mwb -bidi -edge left
 Restart=on-failure
 RestartSec=5
-Environment=DISPLAY=:1
+# DISPLAY and XAUTHORITY are auto-detected by the mwb binary.
 
 [Install]
 WantedBy=default.target

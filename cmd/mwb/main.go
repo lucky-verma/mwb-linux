@@ -109,12 +109,8 @@ func main() {
 				slog.Info("connected (inbound)", "remote", conn.RemoteName)
 			}
 
-			// Start clipboard sharing
-			display := os.Getenv("DISPLAY")
-			if display == "" {
-				display = ":1"
-			}
-			clipMgr := clipboard.NewManager(conn, display)
+			// Start clipboard sharing — use the auto-detected display
+			clipMgr := clipboard.NewManager(conn, capture.DetectDisplay())
 			handler.Clipboard = clipMgr
 			clipMgr.Start()
 

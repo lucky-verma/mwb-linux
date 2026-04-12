@@ -263,35 +263,116 @@ func (c *Capturer) pollCursorEdge() {
 
 var cachedDisplay string
 
+// DetectDisplay finds the active X11 display and XAUTHORITY, caches the result,
+// and sets XAUTHORITY in the process environment if missing.
+// Detection order: DISPLAY env var → loginctl session query → X11 socket scan → ":0".
+func DetectDisplay() string {
+	return getDisplay()
+}
+
 func getDisplay() string {
 	if cachedDisplay != "" {
 		return cachedDisplay
 	}
+
+	// 1. Check environment variable (explicit override)
 	d := os.Getenv("DISPLAY")
-	if d != "" {
-		cachedDisplay = d
-		return d
+
+	// 2. Ask loginctl for the active graphical session's display
+	if d == "" {
+		d = detectDisplayFromLoginctl()
 	}
-	entries, err := os.ReadDir("/proc")
-	if err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			env, err := os.ReadFile(fmt.Sprintf("/proc/%s/environ", e.Name()))
-			if err != nil {
-				continue
-			}
-			for _, kv := range strings.Split(string(env), "\x00") {
-				if strings.HasPrefix(kv, "DISPLAY=") {
-					cachedDisplay = strings.TrimPrefix(kv, "DISPLAY=")
-					return cachedDisplay
-				}
+
+	// 3. Scan X11 sockets as last resort
+	if d == "" {
+		d = detectDisplayFromSockets()
+	}
+
+	// 4. Final fallback
+	if d == "" {
+		d = ":0"
+	}
+
+	cachedDisplay = d
+	// Set in process environment so all child commands (xrandr, xdotool, xinput, xclip) inherit it
+	os.Setenv("DISPLAY", d)
+	slog.Info("X11 display detected", "display", d)
+
+	// Also ensure XAUTHORITY is set — xdotool/xinput/xclip need it when running as root
+	detectAndSetXauthority(d)
+
+	return cachedDisplay
+}
+
+// detectDisplayFromLoginctl queries loginctl for an active X11 session.
+func detectDisplayFromLoginctl() string {
+	out, err := exec.Command("loginctl", "list-sessions", "--no-legend").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 1 {
+			continue
+		}
+		sid := fields[0]
+		display, err := exec.Command("loginctl", "show-session", sid, "-p", "Display", "--value").Output()
+		if err != nil {
+			continue
+		}
+		d := strings.TrimSpace(string(display))
+		if d != "" {
+			return d
+		}
+	}
+	return ""
+}
+
+// detectDisplayFromSockets checks /tmp/.X11-unix/ for active X server sockets.
+func detectDisplayFromSockets() string {
+	entries, err := os.ReadDir("/tmp/.X11-unix")
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "X") {
+			return ":" + strings.TrimPrefix(name, "X")
+		}
+	}
+	return ""
+}
+
+// detectAndSetXauthority finds the Xauthority file for the given display
+// and sets XAUTHORITY in the process environment if not already set.
+func detectAndSetXauthority(display string) {
+	if os.Getenv("XAUTHORITY") != "" {
+		return
+	}
+	// Common GDM/SDDM paths for UID 1000+ users
+	entries, _ := os.ReadDir("/run/user")
+	for _, e := range entries {
+		// Try GDM path first, then generic .Xauthority
+		candidates := []string{
+			fmt.Sprintf("/run/user/%s/gdm/Xauthority", e.Name()),
+			fmt.Sprintf("/run/user/%s/.Xauthority", e.Name()),
+		}
+		for _, path := range candidates {
+			if _, err := os.Stat(path); err == nil {
+				os.Setenv("XAUTHORITY", path)
+				slog.Info("XAUTHORITY auto-detected", "path", path)
+				return
 			}
 		}
 	}
-	cachedDisplay = ":1"
-	return cachedDisplay
+	// Try home directory fallback
+	if home := os.Getenv("HOME"); home != "" {
+		path := filepath.Join(home, ".Xauthority")
+		if _, err := os.Stat(path); err == nil {
+			os.Setenv("XAUTHORITY", path)
+			slog.Info("XAUTHORITY auto-detected", "path", path)
+		}
+	}
 }
 
 func getCursorPosition() (x, y int32, err error) {
