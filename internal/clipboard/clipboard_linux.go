@@ -118,7 +118,11 @@ func (m *Manager) pollClipboard() {
 				m.mu.Unlock()
 				if changed {
 					slog.Info("image clipboard changed, sending to remote", "size", len(imgData))
-					go m.sendImage(imgData)
+					m.wg.Add(1)
+					go func(d []byte) {
+						defer m.wg.Done()
+						m.sendImage(d)
+					}(imgData)
 				}
 				continue
 			}
@@ -138,7 +142,11 @@ func (m *Manager) pollClipboard() {
 
 			if changed {
 				slog.Info("clipboard changed, sending to remote", "len", len(text))
-				go m.sendText(text)
+				m.wg.Add(1)
+				go func(t string) {
+					defer m.wg.Done()
+					m.sendText(t)
+				}(text)
 			}
 		}
 	}
@@ -350,6 +358,9 @@ func (m *Manager) handleImageClipboard(data []byte) {
 
 	m.mu.Lock()
 	m.justSet = time.Now()
+	// Also update lastHash so pollClipboard doesn't re-send after the 3s suppress
+	// window expires — without this, the same image echoes back to Windows.
+	m.lastHash = fmt.Sprintf("img:%d", len(data))
 	m.mu.Unlock()
 	slog.Info("clipboard image received from remote", "size", len(data), "mime", mimeType)
 }

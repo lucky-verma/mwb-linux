@@ -34,6 +34,9 @@ func (m *MockInputDevice) Wheel(delta int32) error {
 	m.Wheels = append(m.Wheels, delta)
 	return nil
 }
+func (m *MockInputDevice) HWheel(delta int32) error {
+	return nil
+}
 func (m *MockInputDevice) KeyDown(code uint16) error {
 	m.KeyDowns = append(m.KeyDowns, code)
 	return nil

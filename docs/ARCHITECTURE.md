@@ -257,12 +257,80 @@ sudo mwb -bidi -edge left -debug
 - `xrandr` installed (for screen detection)
 - Run with `sudo` for evdev access, or configure udev rules
 
+## Critical Invariants
+
+These are non-obvious rules that **must not be broken** by refactoring.
+Each has caused a production bug when violated.
+
+### Mutex: never hold `c.mu` when calling `enableXinput()` / `disableXinput()`
+
+Both methods acquire `c.mu` internally. Calling them while already holding `c.mu`
+causes an immediate deadlock — Go's `sync.Mutex` is not reentrant. `SetActive` and
+`handleRel` release `c.mu` explicitly before calling these methods.
+
+```go
+// WRONG — deadlock
+func (c *Capturer) SetActive(active bool) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    c.enableXinput() // tries to acquire c.mu → deadlock
+}
+
+// CORRECT
+func (c *Capturer) SetActive(active bool) {
+    c.mu.Lock()
+    // ... update state ...
+    c.mu.Unlock()   // release first
+    c.enableXinput() // then call
+}
+```
+
+### xinput: NEVER call `enable`/`disable` on `[floating slave]` devices
+
+Floating slaves are already detached from the X11 master pointer/keyboard.
+Calling `xinput enable` or `xinput disable` on them corrupts their state,
+and they require manual recovery (`xinput reattach` + `xinput enable`).
+
+`parseXinputIDs` skips any line containing `[floating slave]`. This filter
+must be preserved. **Test:** `TestParseXinputIDs_SkipsFloatingSlaves`.
+
+### xinput: `enableXinput()` only when `disabledXinputIDs` is non-empty (or as cleanup)
+
+Calling `enableXinput()` unconditionally at startup or on reconnect will run
+`xinput enable` on attached devices. While this is idempotent for enabled
+devices, it must never be called on floating devices (see above). `New()` does
+not call `enableXinput()` — `Stop()` handles cleanup for the cycle.
+
+### Cursor position: both `OnActivated` and `OnReclaimed` must move cursor away from edge
+
+When the cursor returns to Ubuntu (via either `MachineSwitched` or `NextMachine`),
+it arrives at the switch edge (e.g. `x=0` for a left-edge setup). Without
+a `xdotool mousemove` call, the cursor stays at the edge, `canSwitch` never
+arms, and the user's mouse appears frozen. Both callbacks must call
+`SafeEntryPosition()` and move the cursor 100px inside.
+
+### `Stop()` must drain goroutines before returning
+
+`monitorDevice` goroutines block on `f.Read()` indefinitely. Without closing
+the device file descriptors and waiting on the `WaitGroup`, goroutines accumulate
+across reconnect cycles (35 devices × N reconnects). `Stop()` closes all stored
+`deviceFiles` and calls `c.wg.Wait()`.
+
+### `SendPacket` must hold `sendMu` for the full `enc.Write` call
+
+`cipher.CBCEncrypter` is NOT goroutine-safe — it mutates internal IV state on
+every call. Concurrent `SendPacket` calls from heartbeat, clipboard, and capture
+goroutines corrupt the CBC stream. The `sendMu sync.Mutex` on `Conn` serializes
+all writes.
+
+---
+
 ## Future Work
 
-- [ ] Clipboard sharing (text copy/paste between machines)
 - [ ] File drag-and-drop
 - [ ] Multi-monitor support
-- [ ] Wayland native support (replace xdotool/xinput)
-- [ ] Auto-detect remote screen dimensions
-- [ ] Systemd service with proper permissions
+- [ ] Wayland native support (replace xdotool/xinput with compositor protocol)
+- [ ] Replace xdotool polling with XInput2 RawMotion events (100 forks/sec → 0)
+- [ ] Replace xinput name-matching with EVIOCGRAB (vendor-agnostic isolation)
+- [ ] Virtual cursor drift correction (wire UpdateRemoteScreen to incoming abs coords)
 - [ ] Smoother cursor transition animations

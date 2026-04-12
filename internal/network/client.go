@@ -25,6 +25,7 @@ type Conn struct {
 	LocalName  string
 	RemoteName string
 	nextID     atomic.Int32
+	sendMu     sync.Mutex // guards enc.Write — CBC mode is not goroutine-safe
 }
 
 // Cached key material — PBKDF2 is expensive (50k iterations), only derive once.
@@ -269,6 +270,8 @@ func (c *Conn) doHandshake(machineName string) error {
 
 // SendPacket marshals, stamps, and sends a packet with a 500ms write deadline
 // matching OG MWB's SendTimeout to prevent stuck writes from blocking.
+// sendMu serializes all writes: cipher.CBCEncrypter mutates internal IV state
+// on every call and is not safe for concurrent use.
 func (c *Conn) SendPacket(p *protocol.Packet) error {
 	// Wrap before reaching 0x7FFFFFFF — protocol requires non-zero, non-negative IDs.
 	if c.nextID.Load() >= 0x7FFFFF00 {
@@ -277,6 +280,8 @@ func (c *Conn) SendPacket(p *protocol.Packet) error {
 	p.ID = c.nextID.Add(1)
 	buf := p.Marshal()
 	protocol.StampPacket(buf, c.magic)
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	_ = c.raw.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 	_, err := c.enc.Write(buf)
 	return err
