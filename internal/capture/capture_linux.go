@@ -235,9 +235,14 @@ func (c *Capturer) pollCursorEdge() {
 
 				// Map local Y to remote entry point (proportional)
 				entryY := int32(float64(y) / float64(c.screen.Height) * 65535)
-				entryX := int32(0) // enter from left of remote
+				// Enter 200px inside the remote screen, not at the literal edge.
+				// Entering at exactly 0 or 65535 triggers Windows MWB's own edge
+				// detection immediately, bouncing the cursor straight back.
+				// 200px margin ≈ 200/1920 * 65535 ≈ 6826 units from the edge.
+				const edgeMargin = int32(6826)
+				entryX := edgeMargin // enter from left of remote, slightly inside
 				if c.edgeSide == "left" {
-					entryX = 65535 // enter from right of remote
+					entryX = 65535 - edgeMargin // enter from right of remote, slightly inside
 				}
 
 				c.mu.Lock()
