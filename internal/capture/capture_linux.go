@@ -68,6 +68,8 @@ type Capturer struct {
 	edgeY         int32     // Y position where cursor left local screen
 	canSwitch     bool      // true once cursor has been away from edge since activation
 	canReturn     bool      // true once cursor has moved away from the remote return edge
+	hotkeyCtrl    bool      // tracks Ctrl key state for hotkey detection
+	hotkeyAlt     bool      // tracks Alt key state for hotkey detection
 }
 
 // New creates a new input capturer.
@@ -96,7 +98,8 @@ func (c *Capturer) SetActive(active bool) {
 	if active && !wasActive {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
-		c.canSwitch = false // must move away from edge first
+		c.canSwitch = false // must move away from local edge before next outbound switch
+		c.canReturn = false // must move away from remote edge before next return switch
 		enableXinput()      // synchronous — must complete before mouse works
 	}
 }
@@ -264,19 +267,27 @@ func (c *Capturer) pollCursorEdge() {
 	}
 }
 
-var cachedDisplay string
+var (
+	displayOnce   sync.Once
+	cachedDisplay string
+)
 
 // DetectDisplay finds the active X11 display and XAUTHORITY, caches the result,
 // and sets XAUTHORITY in the process environment if missing.
 // Detection order: DISPLAY env var → loginctl session query → X11 socket scan → ":0".
+// Safe to call from multiple goroutines; detection runs exactly once.
 func DetectDisplay() string {
 	return getDisplay()
 }
 
 func getDisplay() string {
-	if cachedDisplay != "" {
-		return cachedDisplay
-	}
+	displayOnce.Do(func() {
+		detect()
+	})
+	return cachedDisplay
+}
+
+func detect() {
 
 	// 1. Check environment variable (explicit override)
 	d := os.Getenv("DISPLAY")
@@ -305,8 +316,6 @@ func getDisplay() string {
 
 	// Also ensure XAUTHORITY is set — xdotool/xinput/xclip need it when running as root
 	detectAndSetXauthority(d)
-
-	return cachedDisplay
 }
 
 // detectDisplayFromLoginctl queries loginctl for an active X11 session.
@@ -647,19 +656,17 @@ func (c *Capturer) handleRel(ev inputEvent) {
 	c.sendMouseLocked(absX, absY, 0, protocol.WM_MOUSEMOVE)
 }
 
-// hotkey state tracking
-var hotkeyCtrl, hotkeyAlt bool
-
 func (c *Capturer) handleKey(ev inputEvent) {
-	// Track Ctrl+Alt for hotkey
+	// Track Ctrl+Alt for hotkey — guarded by c.mu via handleEvent → monitorDevice path.
+	// Left/right Ctrl (29, 97) and Left/right Alt (56, 100).
 	if ev.Code == 29 || ev.Code == 97 {
-		hotkeyCtrl = ev.Value == 1
+		c.hotkeyCtrl = ev.Value == 1
 	}
 	if ev.Code == 56 || ev.Code == 100 {
-		hotkeyAlt = ev.Value == 1
+		c.hotkeyAlt = ev.Value == 1
 	}
 	// Ctrl+Alt+Right = force return to Ubuntu
-	if ev.Code == 106 && ev.Value == 1 && hotkeyCtrl && hotkeyAlt {
+	if ev.Code == 106 && ev.Value == 1 && c.hotkeyCtrl && c.hotkeyAlt {
 		if !c.IsActive() {
 			slog.Info("hotkey Ctrl+Alt+Right: returning to Ubuntu")
 			c.SetActive(true)

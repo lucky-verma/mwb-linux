@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +29,7 @@ type Conn struct {
 
 // Cached key material — PBKDF2 is expensive (50k iterations), only derive once.
 var (
+	keyMu        sync.Mutex
 	cachedAESKey []byte
 	cachedIV     []byte
 	cachedMagic  uint32
@@ -35,6 +37,8 @@ var (
 )
 
 func getCachedKeyMaterial(securityKey string) ([]byte, []byte, uint32) {
+	keyMu.Lock()
+	defer keyMu.Unlock()
 	if securityKey == cachedSecret && cachedAESKey != nil {
 		return cachedAESKey, cachedIV, cachedMagic
 	}
