@@ -490,12 +490,22 @@ func getXinputIDs() []int {
 	if err != nil {
 		return nil
 	}
+	return parseXinputIDs(string(out))
+}
+
+// parseXinputIDs extracts IDs of attached (non-floating) Razer/Wooting devices
+// from the output of `xinput list`. Separated from getXinputIDs for testability.
+//
+// Key invariant: NEVER include [floating slave] devices. xinput enable/disable
+// on floating slaves corrupts their attachment state and leaves them unrecoverable
+// without manual xinput reattach + xinput enable.
+func parseXinputIDs(output string) []int {
 	var ids []int
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(output, "\n") {
 		lower := strings.ToLower(line)
-		// Only manage attached slaves (↳ prefix) — skip floating slaves (∼ prefix).
-		// Floating slaves are already detached from the master and don't inject
-		// events into X11; disabling them serves no purpose and breaks re-enable.
+		// Skip floating slaves — they are not attached to a master device and
+		// don't inject events into X11. Calling xinput disable/enable on them
+		// detaches them permanently, requiring manual recovery.
 		if strings.Contains(line, "[floating slave]") {
 			continue
 		}
