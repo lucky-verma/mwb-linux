@@ -1,11 +1,15 @@
 [Unit]
-Description=Mouse Without Borders Linux client
-After=network-online.target
+Description=Mouse Without Borders Linux client (bidirectional)
+After=network-online.target graphical.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/mwb
+# DISPLAY and XAUTHORITY are auto-detected by the mwb binary at startup.
+# Override here only if auto-detection fails for your setup.
+# Environment=DISPLAY=:1
+# Environment=XAUTHORITY=/run/user/1000/gdg/Xauthority
+ExecStart=/usr/local/bin/mwb -bidi -edge left
 Restart=on-failure
 RestartSec=5
 
