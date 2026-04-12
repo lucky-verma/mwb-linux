@@ -536,23 +536,34 @@ func (c *Capturer) disableXinput() {
 }
 
 // enableXinput re-enables the exact device IDs that were disabled by disableXinput.
+// Also scans for any Razer/Wooting devices that are attached-but-disabled from a
+// previous broken session (e.g. disableXinput ran but enableXinput never did because
+// the connection dropped). Only touches attached slaves — never floating devices.
 func (c *Capturer) enableXinput() {
 	c.mu.Lock()
 	ids := c.disabledXinputIDs
 	c.disabledXinputIDs = nil
 	c.mu.Unlock()
-	if len(ids) == 0 {
-		// No cached IDs — fall back to current device list (e.g. first call from New())
-		ids = getXinputIDs()
-	}
+
+	// Always include currently-disabled attached devices to recover from prior
+	// broken sessions — idempotent for already-enabled devices.
+	current := getXinputIDs()
+	merged := make(map[int]struct{}, len(ids)+len(current))
 	for _, id := range ids {
+		merged[id] = struct{}{}
+	}
+	for _, id := range current {
+		merged[id] = struct{}{}
+	}
+
+	for id := range merged {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		cmd := exec.CommandContext(ctx, "xinput", "enable", strconv.Itoa(id))
 		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
 		_ = cmd.Run()
 		cancel()
 	}
-	slog.Info("enabled Razer/Wooting xinput devices", "count", len(ids))
+	slog.Info("enabled Razer/Wooting xinput devices", "count", len(merged))
 }
 
 func findInputDevices() ([]string, error) {
