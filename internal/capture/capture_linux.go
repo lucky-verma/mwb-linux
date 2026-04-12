@@ -433,6 +433,12 @@ func getXinputIDs() []int {
 	var ids []int
 	for _, line := range strings.Split(string(out), "\n") {
 		lower := strings.ToLower(line)
+		// Only manage attached slaves (↳ prefix) — skip floating slaves (∼ prefix).
+		// Floating slaves are already detached from the master and don't inject
+		// events into X11; disabling them serves no purpose and breaks re-enable.
+		if strings.Contains(line, "[floating slave]") {
+			continue
+		}
 		if strings.Contains(lower, "razer") || strings.Contains(lower, "wooting") {
 			if idx := strings.Index(line, "id="); idx >= 0 {
 				numStr := ""
