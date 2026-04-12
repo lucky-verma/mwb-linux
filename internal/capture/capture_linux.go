@@ -123,6 +123,23 @@ func (c *Capturer) IsActive() bool {
 	return c.active
 }
 
+// SafeEntryPosition returns a cursor position 100px inside from the switch edge,
+// safe to move to after MachineSwitched without immediately re-triggering the edge.
+func (c *Capturer) SafeEntryPosition() (x, y int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	y = c.screen.Height / 2
+	switch c.edgeSide {
+	case "left":
+		x = 100
+	case "right":
+		x = c.screen.Width - 100
+	default:
+		x = c.screen.Width / 2
+	}
+	return x, y
+}
+
 // UpdateRemoteScreen detects remote screen dimensions from incoming Mouse packets.
 // Called by the handler when we receive absolute mouse coordinates from the server.
 func (c *Capturer) UpdateRemoteScreen(absX, absY int32) {

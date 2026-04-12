@@ -141,9 +141,19 @@ func main() {
 				cap.SetRemoteScreen(int32(cfg.RemoteWidth), int32(cfg.RemoteHeight))
 				slog.Info("remote screen configured", "width", cfg.RemoteWidth, "height", cfg.RemoteHeight)
 
-				// When we receive MachineSwitched, mark ourselves as active
+				// When we receive MachineSwitched, mark ourselves as active and
+				// move cursor away from edge — without this the cursor stays at
+				// x=0 and re-triggers the edge switch immediately on any movement.
 				handler.OnActivated = func() {
 					cap.SetActive(true)
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						defer cancel()
+						entryX, entryY := cap.SafeEntryPosition()
+						_ = exec.CommandContext(ctx, "xdotool", "mousemove", "--",
+							fmt.Sprintf("%d", entryX),
+							fmt.Sprintf("%d", entryY)).Run()
+					}()
 				}
 
 				// When server sends NextMachine (cursor bounced off server's edge),
