@@ -77,11 +77,11 @@ type Capturer struct {
 }
 
 // New creates a new input capturer.
-// Always calls enableXinput() to ensure devices are re-enabled after a
-// reconnect cycle where xinput may have been left disabled (e.g. connection
-// dropped while cursor was on the Windows screen).
+// Does NOT call enableXinput — Stop() on the previous Capturer already
+// re-enables any devices it disabled. Calling xinput enable unconditionally
+// here can corrupt the attachment state of floating slave devices.
 func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
-	c := &Capturer{
+	return &Capturer{
 		conn:      conn,
 		screen:    screen,
 		active:    true,
@@ -91,8 +91,6 @@ func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 		remoteH:   defaultRemoteHeight,
 		canSwitch: true, // allow first switch immediately
 	}
-	c.enableXinput() // ensure devices are re-enabled after reconnect
-	return c
 }
 
 // SetActive sets whether this machine currently owns the cursor.
@@ -157,9 +155,14 @@ func (c *Capturer) Stop() {
 	}
 	c.mu.Unlock()
 	c.wg.Wait()
-	// Always re-enable xinput on stop — ensures devices are restored even when
-	// the connection drops mid-switch with the cursor on the remote machine.
-	c.enableXinput()
+	// Only re-enable if WE disabled them — avoids calling xinput enable on
+	// floating/unmanaged devices which can corrupt their attachment state.
+	c.mu.Lock()
+	hasDisabled := len(c.disabledXinputIDs) > 0
+	c.mu.Unlock()
+	if hasDisabled {
+		c.enableXinput()
+	}
 }
 
 // Run starts edge detection polling and evdev monitoring.
