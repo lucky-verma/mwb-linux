@@ -6,8 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- X-button support (back/forward): `BTN_SIDE`/`BTN_EXTRA` registered on virtual
+  mouse, `WM_XBUTTONDOWN`/`WM_XBUTTONUP` handled in input handler.
+- Horizontal scroll: `REL_HWHEEL` registered, `WM_MOUSEHWHEEL` handled —
+  two-finger horizontal swipe from Windows trackpad now works on Ubuntu.
+- 15 regression tests in `internal/capture/` covering xinput state management,
+  mutex invariants, edge gate logic, and floating slave filtering.
+- PR template (`.github/PULL_REQUEST_TEMPLATE.md`) with build, race, lint, and
+  xinput safety checklists.
+- `docs/ARCHITECTURE.md`: documented 5 critical invariants with code examples
+  and test references to prevent recurrence of known bug classes.
+
+### Fixed
+- **`SendPacket` data race**: `cipher.CBCEncrypter` is not goroutine-safe —
+  concurrent calls from heartbeat, clipboard, and capture goroutines corrupted
+  the AES stream. Added `sendMu sync.Mutex` to `Conn` serializing all writes.
+- **Mouse button clicks at wrong position**: button events sent `X=0,Y=0` to
+  Windows, registering every click at top-left. Now uses virtual cursor
+  `remoteX/remoteY` state for correct click position.
+- **`cfg.RemoteWidth/Height` ignored**: config values were parsed but never
+  passed to `Capturer`, causing wrong virtual cursor mapping on non-1080p
+  Windows displays and premature return-edge trigger.
+- **`cfg.Edge` ignored**: `--edge` flag defaulted to `right`, silently
+  overriding `edge = "left"` in `config.toml`. Now reads config if flag not set.
+- **Deadlock after first edge switch**: `SetActive()` held `c.mu` and called
+  `enableXinput()` which also acquires `c.mu` — Go mutexes are not reentrant.
+  All goroutines waiting on `c.mu` froze permanently. Fixed by releasing lock
+  before calling `enableXinput`.
+- **Mouse/keyboard dead after `MachineSwitched`**: `OnActivated` callback did
+  not move cursor away from the edge. Cursor stayed at `x=0`, any movement
+  immediately re-triggered the edge switch. Added `xdotool mousemove` via
+  `SafeEntryPosition()`, mirroring `OnReclaimed`.
+- **Xinput floating slave corruption**: `enableXinput()` called unconditionally
+  in `New()` and `Stop()` — calling `xinput enable` on `[floating slave]`
+  devices corrupts attachment state, requiring manual `reattach`. Fixed: only
+  call when `disabledXinputIDs` is non-empty.
+- **Devices left disabled across sessions**: `enableXinput()` now merges cached
+  IDs with a fresh scan to recover attached-but-disabled devices from prior
+  broken sessions (e.g. connection drop mid-switch).
+- **`monitorDevice` goroutine accumulation**: goroutines blocked on `f.Read()`
+  indefinitely after `Stop()`. Fixed: track device fds in `Capturer`,
+  close them in `Stop()`, wait on `WaitGroup`.
+- **`sendText`/`sendImage` goroutines untracked**: clipboard send goroutines
+  outlived the connection and wrote to closed conn. Tracked in `Manager.wg`.
+- **Image clipboard echo-back**: `handleImageClipboard` set `justSet` but not
+  `lastHash` — same image re-sent to Windows after 3s suppress window expired.
+- **`parseXinputIDs` extracted** from `getXinputIDs` for testability; the
+  critical `[floating slave]` filter is now covered by a regression test.
+- **`uinput` keyboard init**: reduced from 767 ioctl calls to ~120 by only
+  registering key codes present in the VK→evdev keymap.
+- **Packet ID wraparound**: `nextID` now resets before reaching `0x7FFFFFFF`
+  to avoid negative IDs violating protocol dedup requirements.
+
 ### Changed
 - CI: opt into Node.js 24 for GitHub Actions ahead of June 2026 forced migration.
+- `Stop()` only calls `enableXinput()` when `disabledXinputIDs` is non-empty.
+- `New()` no longer calls `enableXinput()` unconditionally.
+- `parseXinputIDs` is now a standalone testable function separate from the
+  `xinput` subprocess call.
 
 ## [0.3.1] - 2026-04-12
 

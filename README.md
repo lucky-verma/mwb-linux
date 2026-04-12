@@ -43,6 +43,7 @@ No extra software needed on Windows — just PowerToys, which is already install
 - **Seamless edge switching** — Move cursor to screen edge, it appears on the other machine
 - **Clipboard sync** — Copy text or images on one machine, paste on the other
 - **Keyboard forwarding** — Type on your Linux keyboard, text appears on Windows
+- **Full mouse support** — Scroll wheel, horizontal scroll, and side buttons (back/forward)
 - **Encrypted** — AES-256-CBC encryption with PBKDF2 key derivation
 - **Device isolation** — When controlling Windows, your Linux cursor doesn't move
 - **Dual-mode connection** — Acts as both server and client for fast reconnection
@@ -148,7 +149,7 @@ MWB Linux implements the full Mouse Without Borders protocol:
 
 1. **Dual-mode connection** — Listens on port 15101 AND connects outbound (first one wins)
 2. **Handshake** — AES-256-CBC encrypted challenge-response with PBKDF2-SHA512 key derivation
-3. **Heartbeats** — Proactive keepalive every 30s prevents Windows from dropping the connection
+3. **Heartbeats** — Proactive keepalive every 5s prevents Windows from dropping the connection
 4. **Edge detection** — 10ms cursor polling detects screen edges, instant switching with bounce prevention
 5. **Input forwarding** — Mouse (absolute coords) and keyboard (VK codes) sent as MWB packets
 6. **Device isolation** — `xinput disable/enable` prevents dual cursor movement during remote control
@@ -175,7 +176,7 @@ For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-bidi` | false | Enable bidirectional input (Linux → Windows) |
-| `-edge` | right | Screen edge for switching: `left` or `right` |
+| `-edge` | *(from config)* | Override edge from config: `left` or `right` |
 | `-debug` | false | Enable debug logging |
 | `-config` | ~/.config/mwb/config.toml | Config file path |
 
@@ -227,9 +228,10 @@ scripts/
 ## Known Limitations
 
 - **Keyboard on Windows lock screen** — Keyboard input may not work on the Windows lock screen (Winlogon desktop security restriction)
-- **Middle mouse button scroll** — Auto-scroll with middle mouse button does not work in browsers
+- **Middle mouse button auto-scroll** — Middle-click auto-scroll (scroll lock mode) does not work in browsers; normal middle-click works
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
-- **X11 only** — Edge detection and device isolation use `xdotool`/`xinput` (Wayland support planned)
+- **X11 only** — Edge detection and device isolation use `xdotool`/`xinput` (Wayland requires compositor extensions and is a planned rewrite)
+- **Virtual cursor drift** — Remote cursor tracking uses a fixed 2× acceleration; may drift from actual position over extended use. Set `accel_multiplier` in config if needed
 
 ## Contributing
 
