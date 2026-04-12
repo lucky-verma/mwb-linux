@@ -67,6 +67,7 @@ type Capturer struct {
 	remoteH       int32     // detected remote screen height
 	edgeY         int32     // Y position where cursor left local screen
 	canSwitch     bool      // true once cursor has been away from edge since activation
+	canReturn     bool      // true once cursor has moved away from the remote return edge
 }
 
 // New creates a new input capturer.
@@ -227,13 +228,15 @@ func (c *Capturer) pollCursorEdge() {
 				c.active = false
 				c.switchSent = time.Now()
 				c.edgeY = y
-				// Set virtual cursor at the entry point (in remote pixel space)
+				// Set virtual cursor offset from the return edge to prevent jitter bounce.
+				// Entry is 200px from the return edge — gives room for mouse momentum.
 				if c.edgeSide == "left" {
-					c.remoteX = c.remoteW - 1
+					c.remoteX = c.remoteW - 200
 				} else {
-					c.remoteX = 0
+					c.remoteX = 200
 				}
 				c.remoteY = int32(float64(y) / float64(c.screen.Height) * float64(c.remoteH))
+				c.canReturn = false // must move away from return edge first
 				c.mu.Unlock()
 
 				// Disable local input in X11 (synchronous — only takes ~2ms)
@@ -566,17 +569,33 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		return
 	}
 
-	// Check if virtual cursor hit the return edge (opposite of edgeSide)
-	switchBack := false
+	// canReturn gate: must move 200px away from return edge before allowing return.
+	// This prevents jitter/momentum from the initial switch from bouncing back.
+	returnZone := int32(200)
 	switch c.edgeSide {
 	case "left":
-		// We switched to remote via left edge, return via right edge of remote
-		if c.remoteX >= c.remoteW-1 {
-			switchBack = true
+		if c.remoteX < c.remoteW-returnZone {
+			c.canReturn = true
 		}
 	case "right":
-		if c.remoteX <= 0 {
-			switchBack = true
+		if c.remoteX > returnZone {
+			c.canReturn = true
+		}
+	}
+
+	// Check if virtual cursor hit the return edge (opposite of edgeSide)
+	switchBack := false
+	if c.canReturn {
+		switch c.edgeSide {
+		case "left":
+			// We switched to remote via left edge, return via right edge of remote
+			if c.remoteX >= c.remoteW-1 {
+				switchBack = true
+			}
+		case "right":
+			if c.remoteX <= 0 {
+				switchBack = true
+			}
 		}
 	}
 
