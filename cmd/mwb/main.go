@@ -23,7 +23,7 @@ import (
 func main() {
 	configPath := flag.String("config", "", "path to config.toml")
 	debug := flag.Bool("debug", false, "enable debug logging")
-	edgeSide := flag.String("edge", "right", "screen edge to switch: left or right")
+	edgeSide := flag.String("edge", "", "screen edge to switch: left or right (overrides config)")
 	bidirectional := flag.Bool("bidi", false, "enable bidirectional input (send local input to remote)")
 	flag.Parse()
 
@@ -46,8 +46,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Apply config defaults for flags not explicitly set on the command line.
+	// This allows config.toml to set edge/remote dims without requiring CLI flags.
+	if *edgeSide == "" {
+		*edgeSide = cfg.Edge
+	}
+	if *edgeSide == "" {
+		*edgeSide = "right" // final fallback
+	}
+
 	slog.Debug("debug logging enabled")
-	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional)
+	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional, "edge", *edgeSide)
 
 	mouse, err := input.CreateVirtualMouse("mwb-mouse")
 	if err != nil {
@@ -127,6 +136,10 @@ func main() {
 				slog.Info("screen detected", "width", screen.Width, "height", screen.Height)
 
 				cap = capture.New(conn, screen, *edgeSide)
+				// Wire remote screen dimensions from config so virtual cursor
+				// coordinate mapping is correct for non-1080p Windows displays.
+				cap.SetRemoteScreen(int32(cfg.RemoteWidth), int32(cfg.RemoteHeight))
+				slog.Info("remote screen configured", "width", cfg.RemoteWidth, "height", cfg.RemoteHeight)
 
 				// When we receive MachineSwitched, mark ourselves as active
 				handler.OnActivated = func() {

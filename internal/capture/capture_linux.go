@@ -59,19 +59,21 @@ type Capturer struct {
 	edgeSide      string // "left" or "right"
 	mu            sync.Mutex
 	stopCh        chan struct{}
-	lastSwitch    time.Time // debounce outgoing switches
-	switchSent    time.Time // when we last sent switch packets
-	lastActivated time.Time // when cursor last arrived on this machine
-	remoteX       int32     // virtual cursor position on remote (pixels)
-	remoteY       int32     // virtual cursor position on remote (pixels)
-	remoteW       int32     // detected remote screen width
-	remoteH       int32     // detected remote screen height
-	edgeY         int32     // Y position where cursor left local screen
-	canSwitch         bool  // true once cursor has been away from edge since activation
-	canReturn         bool  // true once cursor has moved away from the remote return edge
-	hotkeyCtrl        bool  // tracks Ctrl key state for hotkey detection
-	hotkeyAlt         bool  // tracks Alt key state for hotkey detection
-	disabledXinputIDs []int // device IDs we disabled — re-enable same set to avoid TOCTOU
+	wg            sync.WaitGroup // tracks all goroutines for clean Stop()
+	deviceFiles   []*os.File     // open /dev/input/event* fds — closed on Stop() to unblock f.Read
+	lastSwitch    time.Time      // debounce outgoing switches
+	switchSent    time.Time      // when we last sent switch packets
+	lastActivated time.Time      // when cursor last arrived on this machine
+	remoteX       int32          // virtual cursor position on remote (pixels)
+	remoteY       int32          // virtual cursor position on remote (pixels)
+	remoteW       int32          // detected remote screen width
+	remoteH       int32          // detected remote screen height
+	edgeY         int32          // Y position where cursor left local screen
+	canSwitch         bool       // true once cursor has been away from edge since activation
+	canReturn         bool       // true once cursor has moved away from the remote return edge
+	hotkeyCtrl        bool       // tracks Ctrl key state for hotkey detection
+	hotkeyAlt         bool       // tracks Alt key state for hotkey detection
+	disabledXinputIDs []int      // device IDs we disabled — re-enable same set to avoid TOCTOU
 }
 
 // New creates a new input capturer.
@@ -142,9 +144,22 @@ func (c *Capturer) SetRemoteScreen(w, h int32) {
 	}
 }
 
-// Stop signals the capturer to stop.
+// Stop signals the capturer to stop, waits for all goroutines to exit,
+// and ensures xinput devices are always re-enabled on teardown.
 func (c *Capturer) Stop() {
 	close(c.stopCh)
+	// Close all device fds to unblock any goroutines stuck in f.Read().
+	// Without this, monitorDevice goroutines block indefinitely and accumulate
+	// across reconnect cycles (35 devices × N reconnects = goroutine storm).
+	c.mu.Lock()
+	for _, f := range c.deviceFiles {
+		_ = f.Close()
+	}
+	c.mu.Unlock()
+	c.wg.Wait()
+	// Always re-enable xinput on stop — ensures devices are restored even when
+	// the connection drops mid-switch with the cursor on the remote machine.
+	c.enableXinput()
 }
 
 // Run starts edge detection polling and evdev monitoring.
@@ -156,9 +171,24 @@ func (c *Capturer) Run() error {
 	}
 	slog.Info("found input devices", "count", len(devices))
 
-	go c.pollCursorEdge()
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.pollCursorEdge()
+	}()
 	for _, d := range devices {
-		go c.monitorDevice(d)
+		f, err := os.Open(d)
+		if err != nil {
+			continue
+		}
+		c.mu.Lock()
+		c.deviceFiles = append(c.deviceFiles, f)
+		c.mu.Unlock()
+		c.wg.Add(1)
+		go func(file *os.File) {
+			defer c.wg.Done()
+			c.monitorDevice(file)
+		}(f)
 	}
 	return nil
 }
@@ -519,14 +549,9 @@ func findInputDevices() ([]string, error) {
 	return devices, nil
 }
 
-func (c *Capturer) monitorDevice(path string) {
-	f, err := os.Open(path)
-	if err != nil {
-		return
-	}
+func (c *Capturer) monitorDevice(f *os.File) {
 	defer f.Close() //nolint:errcheck
-
-	slog.Debug("monitoring device", "path", path)
+	slog.Debug("monitoring device", "path", f.Name())
 	buf := make([]byte, inputEventSize*32)
 	for {
 		select {
@@ -745,7 +770,13 @@ func (c *Capturer) handleKey(ev inputEvent) {
 					return
 				}
 			}
-			c.sendMouse(0, 0, 0, flags)
+			// Use current virtual cursor position so clicks register at the
+			// correct location on Windows, not always at top-left (0,0).
+			c.mu.Lock()
+			absX := int32(float64(c.remoteX) / float64(c.remoteW) * 65535)
+			absY := int32(float64(c.remoteY) / float64(c.remoteH) * 65535)
+			c.mu.Unlock()
+			c.sendMouse(absX, absY, 0, flags)
 		}
 		return
 	}

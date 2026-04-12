@@ -32,7 +32,8 @@ const (
 
 // Relative axes
 const (
-	relWheel uint16 = 0x08
+	relWheel  uint16 = 0x08
+	relHWheel uint16 = 0x06 // horizontal scroll
 )
 
 // Absolute axes
@@ -141,7 +142,10 @@ func CreateVirtualMouse(name string) (*VirtualMouse, error) {
 		}
 	}
 
-	for _, btn := range []uintptr{uintptr(BTN_LEFT), uintptr(BTN_RIGHT), uintptr(BTN_MIDDLE)} {
+	for _, btn := range []uintptr{
+		uintptr(BTN_LEFT), uintptr(BTN_RIGHT), uintptr(BTN_MIDDLE),
+		uintptr(BTN_SIDE), uintptr(BTN_EXTRA), // X-button 1 and 2
+	} {
 		if err := ioctl(fd, uiSetKeyBit, btn); err != nil {
 			return nil, fmt.Errorf("UI_SET_KEYBIT: %w", err)
 		}
@@ -153,8 +157,10 @@ func CreateVirtualMouse(name string) (*VirtualMouse, error) {
 		}
 	}
 
-	if err := ioctl(fd, uiSetRelBit, uintptr(relWheel)); err != nil {
-		return nil, fmt.Errorf("UI_SET_RELBIT: %w", err)
+	for _, rel := range []uintptr{uintptr(relWheel), uintptr(relHWheel)} {
+		if err := ioctl(fd, uiSetRelBit, rel); err != nil {
+			return nil, fmt.Errorf("UI_SET_RELBIT: %w", err)
+		}
 	}
 
 	if err := setupMouseNew(fd, name); err != nil {
@@ -224,6 +230,13 @@ func (m *VirtualMouse) ButtonUp(button uint16) error {
 // Wheel scrolls the mouse wheel by delta units (positive = up, negative = down).
 func (m *VirtualMouse) Wheel(delta int32) error {
 	if err := writeEvent(m.fd, evRel, relWheel, delta); err != nil {
+		return err
+	}
+	return syncEvents(m.fd)
+}
+
+func (m *VirtualMouse) HWheel(delta int32) error {
+	if err := writeEvent(m.fd, evRel, relHWheel, delta); err != nil {
 		return err
 	}
 	return syncEvents(m.fd)

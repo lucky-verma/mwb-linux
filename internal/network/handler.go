@@ -15,6 +15,7 @@ type MouseDevice interface {
 	ButtonDown(button uint16) error
 	ButtonUp(button uint16) error
 	Wheel(delta int32) error
+	HWheel(delta int32) error
 }
 
 // KeyboardDevice is the interface for keyboard injection.
@@ -103,6 +104,23 @@ func (h *Handler) handleMouse(pkt *protocol.Packet) {
 		if err = h.Mouse.MoveTo(md.X, md.Y); err == nil {
 			err = h.Mouse.ButtonUp(input.BTN_MIDDLE)
 		}
+	case protocol.WM_XBUTTONDOWN:
+		if err = h.Mouse.MoveTo(md.X, md.Y); err == nil {
+			// WheelDelta holds which X-button: 1=XBUTTON1 (BTN_SIDE), 2=XBUTTON2 (BTN_EXTRA)
+			btn := uint16(input.BTN_SIDE)
+			if md.WheelDelta == 2 {
+				btn = input.BTN_EXTRA
+			}
+			err = h.Mouse.ButtonDown(btn)
+		}
+	case protocol.WM_XBUTTONUP:
+		if err = h.Mouse.MoveTo(md.X, md.Y); err == nil {
+			btn := uint16(input.BTN_SIDE)
+			if md.WheelDelta == 2 {
+				btn = input.BTN_EXTRA
+			}
+			err = h.Mouse.ButtonUp(btn)
+		}
 	case protocol.WM_MOUSEWHEEL:
 		delta := md.WheelDelta / 120
 		if delta == 0 && md.WheelDelta > 0 {
@@ -111,6 +129,14 @@ func (h *Handler) handleMouse(pkt *protocol.Packet) {
 			delta = -1
 		}
 		err = h.Mouse.Wheel(delta)
+	case protocol.WM_MOUSEHWHEEL:
+		delta := md.WheelDelta / 120
+		if delta == 0 && md.WheelDelta > 0 {
+			delta = 1
+		} else if delta == 0 && md.WheelDelta < 0 {
+			delta = -1
+		}
+		err = h.Mouse.HWheel(delta)
 	default:
 		slog.Debug("unhandled mouse event", "flags", md.DwFlags)
 		return
