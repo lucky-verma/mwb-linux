@@ -73,7 +73,11 @@ type Capturer struct {
 }
 
 // New creates a new input capturer.
+// Always calls enableXinput() to ensure devices are re-enabled after a
+// reconnect cycle where xinput may have been left disabled (e.g. connection
+// dropped while cursor was on the Windows screen).
 func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
+	enableXinput()
 	return &Capturer{
 		conn:      conn,
 		screen:    screen,
