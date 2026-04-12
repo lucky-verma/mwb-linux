@@ -164,3 +164,25 @@ func VKToKeyCode(vk int32) (uint16, bool) {
 	code, ok := vkMap[vk]
 	return code, ok
 }
+
+// usedKeyCodes returns a deduplicated sorted list of all Linux evdev key codes
+// referenced by vkMap. Used by CreateVirtualKeyboard to register only the bits
+// it needs — avoids 640+ unnecessary UI_SET_KEYBIT ioctl calls (KEY_MAX=767
+// vs actual max used code of ~127).
+func usedKeyCodes() []uint16 {
+	seen := make(map[uint16]struct{}, len(vkMap))
+	for _, code := range vkMap {
+		seen[code] = struct{}{}
+	}
+	codes := make([]uint16, 0, len(seen))
+	for code := range seen {
+		codes = append(codes, code)
+	}
+	// Sort for deterministic ioctl order
+	for i := 1; i < len(codes); i++ {
+		for j := i; j > 0 && codes[j] < codes[j-1]; j-- {
+			codes[j], codes[j-1] = codes[j-1], codes[j]
+		}
+	}
+	return codes
+}

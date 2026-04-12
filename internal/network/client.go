@@ -270,6 +270,10 @@ func (c *Conn) doHandshake(machineName string) error {
 // SendPacket marshals, stamps, and sends a packet with a 500ms write deadline
 // matching OG MWB's SendTimeout to prevent stuck writes from blocking.
 func (c *Conn) SendPacket(p *protocol.Packet) error {
+	// Wrap before reaching 0x7FFFFFFF — protocol requires non-zero, non-negative IDs.
+	if c.nextID.Load() >= 0x7FFFFF00 {
+		c.nextID.Store(0)
+	}
 	p.ID = c.nextID.Add(1)
 	buf := p.Marshal()
 	protocol.StampPacket(buf, c.magic)
