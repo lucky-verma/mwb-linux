@@ -20,6 +20,12 @@ const (
 	uiSetKeyBit  uintptr = 0x40045565
 	uiSetRelBit  uintptr = 0x40045566
 	uiSetAbsBit  uintptr = 0x40045567
+	uiSetPropBit uintptr = 0x4004556e // _IOW('U', 110, int) — kernel >= 3.12
+)
+
+// Device properties (from /usr/include/linux/input-event-codes.h)
+const (
+	inputPropPointer uint16 = 0x00
 )
 
 // Event types
@@ -162,6 +168,12 @@ func CreateVirtualMouse(name string) (*VirtualMouse, error) {
 			return nil, fmt.Errorf("UI_SET_RELBIT: %w", err)
 		}
 	}
+
+	// libinput needs INPUT_PROP_POINTER to classify our absolute device as a pointer;
+	// without it, Wayland compositors apply pointer accel/prediction on top of our
+	// already-absolute coords, producing nonlinear ("woobly") motion (issue #5).
+	// Soft-fail for kernels < 3.12 which lack UI_SET_PROPBIT.
+	_ = ioctl(fd, uiSetPropBit, uintptr(inputPropPointer))
 
 	if err := setupMouseNew(fd, name); err != nil {
 		if err := setupMouseLegacy(fd, name); err != nil {

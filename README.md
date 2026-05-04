@@ -230,7 +230,7 @@ scripts/
 - **Keyboard on Windows lock screen** — Keyboard input may not work on the Windows lock screen (Winlogon desktop security restriction)
 - **Middle mouse button auto-scroll** — Middle-click auto-scroll (scroll lock mode) does not work in browsers; normal middle-click works
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
-- **X11 only** — Edge detection and device isolation use `xdotool`/`xinput` (Wayland requires compositor extensions and is a planned rewrite)
+- **Bidirectional mode requires X11** — Edge detection and device isolation use `xdotool`/`xinput`. Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
 - **Virtual cursor drift** — Remote cursor tracking uses a fixed 2× acceleration; may drift from actual position over extended use. Set `accel_multiplier` in config if needed
 
 ## Contributing

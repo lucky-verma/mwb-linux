@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Woobly cursor on Wayland (#5)**: virtual mouse now declares
+  `INPUT_PROP_POINTER` via `UI_SET_PROPBIT`. Without it, libinput on
+  Wayland/Mutter/KWin misclassifies the device and applies pointer
+  acceleration / cursor prediction on top of our already-absolute coords,
+  producing nonlinear motion. X11 path was unaffected because XTest bypasses
+  libinput. Regression test in `uinput_test.go` reads
+  `/sys/class/input/inputN/properties` to verify the bit stays set.
+
 ### Added
 - X-button support (back/forward): `BTN_SIDE`/`BTN_EXTRA` registered on virtual
   mouse, `WM_XBUTTONDOWN`/`WM_XBUTTONUP` handled in input handler.
