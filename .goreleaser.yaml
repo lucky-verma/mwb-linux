@@ -1,0 +1,89 @@
+version: 2
+
+project_name: mwb-linux
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mwb
+    main: ./cmd/mwb
+    binary: mwb
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: mwb
+    ids:
+      - mwb
+    name_template: "mwb-linux-{{ .Arch }}"
+    formats:
+      - binary
+
+nfpms:
+  - id: mwb-deb
+    ids:
+      - mwb
+    package_name: mwb-linux
+    file_name_template: "mwb-linux_{{ .Version }}_{{ .Arch }}"
+    vendor: Lucky Verma
+    homepage: https://github.com/lucky-verma/mwb-linux
+    maintainer: Lucky Verma <lucky@thinkersloop.com>
+    description: |-
+      Mouse Without Borders for Linux.
+      Share keyboard, mouse, and clipboard seamlessly between Linux and
+      Windows machines running Microsoft PowerToys Mouse Without Borders.
+    license: MIT
+    section: utils
+    priority: optional
+    formats:
+      - deb
+    bindir: /usr/local/bin
+    dependencies:
+      - xdotool
+      - xinput
+      - xclip
+      - x11-xserver-utils
+    contents:
+      - src: ./mwb.service
+        dst: /usr/lib/systemd/user/mwb.service
+      - src: ./packaging/99-mwb.rules
+        dst: /etc/udev/rules.d/99-mwb-uinput.rules
+      - src: ./README.md
+        dst: /usr/share/doc/mwb-linux/README.md
+      - src: ./LICENSE
+        dst: /usr/share/doc/mwb-linux/LICENSE
+    scripts:
+      postinstall: ./packaging/postinstall.sh
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: lucky-verma
+    name: mwb-linux
+  draft: false
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
