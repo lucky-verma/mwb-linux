@@ -59,6 +59,8 @@ nfpms:
         dst: /usr/lib/systemd/user/mwb.service
       - src: ./packaging/99-mwb.rules
         dst: /etc/udev/rules.d/99-mwb-uinput.rules
+      - src: ./packaging/99-mwb-libinput.rules
+        dst: /etc/udev/rules.d/99-mwb-libinput.rules
       - src: ./README.md
         dst: /usr/share/doc/mwb-linux/README.md
       - src: ./LICENSE

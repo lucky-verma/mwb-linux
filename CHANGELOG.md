@@ -7,13 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
-- **Woobly cursor on Wayland (#5)**: virtual mouse now declares
-  `INPUT_PROP_POINTER` via `UI_SET_PROPBIT`. Without it, libinput on
-  Wayland/Mutter/KWin misclassifies the device and applies pointer
-  acceleration / cursor prediction on top of our already-absolute coords,
-  producing nonlinear motion. X11 path was unaffected because XTest bypasses
-  libinput. Regression test in `uinput_test.go` reads
-  `/sys/class/input/inputN/properties` to verify the bit stays set.
+- **Woobly cursor on Wayland (#5)**: two-part fix.
+  1. Virtual mouse now declares `INPUT_PROP_POINTER` via `UI_SET_PROPBIT`
+     so libinput stops misclassifying the device. Regression test in
+     `uinput_test.go` reads `/sys/class/input/inputN/properties` to verify
+     the bit stays set.
+  2. Ship `packaging/99-mwb-libinput.rules` udev rule that tags the
+     `mwb-mouse` device with `LIBINPUT_ACCEL_PROFILE=flat` and
+     `LIBINPUT_ACCEL_SPEED=0`. Reporter's `libinput debug-events` showed
+     network-driven packet bursts produce variable input deltas (5–11×
+     variance per axis); libinput's default adaptive accel curve was
+     amplifying that variance into visible wobble. Flat profile maps
+     deltas linearly so jitter is no longer multiplied. X11 path was
+     unaffected throughout because XTest bypasses libinput.
 
 ### Added
 - X-button support (back/forward): `BTN_SIDE`/`BTN_EXTRA` registered on virtual

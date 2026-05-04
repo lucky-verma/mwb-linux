@@ -1,0 +1,6 @@
+# mwb virtual mouse: tell libinput not to apply pointer acceleration.
+# The device receives absolute coordinates over the network; bursty
+# packet timing produces variable input deltas. libinput's default
+# adaptive accel curve amplifies that variance into visible cursor
+# wobble on Wayland (issue #5). Flat profile = linear 1:1 mapping.
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="mwb-mouse", ENV{LIBINPUT_ACCEL_PROFILE}="flat", ENV{LIBINPUT_ACCEL_SPEED}="0"
