@@ -137,17 +137,16 @@ func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Con
 // ListenAndAccept starts a TCP server on the given port and sends accepted
 // connections (after handshake) to the returned channel. This allows Windows
 // MWB to connect TO us, which is faster after lock/reconnect cycles.
-func ListenAndAccept(port int, securityKey, machineName string, stop chan struct{}) chan *Conn {
+func ListenAndAccept(port int, securityKey, machineName string, stop chan struct{}) (chan *Conn, error) {
 	connCh := make(chan *Conn, 1)
+	addr := fmt.Sprintf(":%d", port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
 
 	go func() {
 		defer close(connCh)
-		addr := fmt.Sprintf(":%d", port)
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			slog.Error("server listen failed", "addr", addr, "err", err)
-			return
-		}
 		defer func() { _ = ln.Close() }()
 		slog.Info("listening for incoming MWB connections", "port", port)
 
@@ -190,7 +189,7 @@ func ListenAndAccept(port int, securityKey, machineName string, stop chan struct
 		}
 	}()
 
-	return connCh
+	return connCh, nil
 }
 
 func (c *Conn) doHandshake(machineName string) error {

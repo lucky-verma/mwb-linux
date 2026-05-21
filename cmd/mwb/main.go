@@ -91,7 +91,12 @@ func main() {
 
 	// Start TCP server to accept incoming connections from Windows MWB
 	serverStop := make(chan struct{})
-	incomingCh := network.ListenAndAccept(cfg.MessagePort(), cfg.Key, cfg.Name, serverStop)
+	incomingCh, err := network.ListenAndAccept(cfg.MessagePort(), cfg.Key, cfg.Name, serverStop)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error starting listener: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Is another mwb instance already running?")
+		os.Exit(1)
+	}
 	defer close(serverStop)
 
 	go func() {

@@ -135,3 +135,22 @@ func TestConnectionHandshake(t *testing.T) {
 		t.Fatal("timeout waiting for server")
 	}
 }
+
+func TestListenAndAcceptReturnsBindError(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	stop := make(chan struct{})
+	connCh, err := ListenAndAccept(port, "TestSecurityKey!!", "linux-test", stop)
+	if err == nil {
+		close(stop)
+		t.Fatal("expected bind error, got nil")
+	}
+	if connCh != nil {
+		t.Fatalf("expected nil connection channel on bind error, got %v", connCh)
+	}
+}
