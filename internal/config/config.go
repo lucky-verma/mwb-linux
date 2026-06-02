@@ -16,6 +16,7 @@ type Config struct {
 	RemoteWidth  int    `toml:"remote_width"`
 	RemoteHeight int    `toml:"remote_height"`
 	Edge         string `toml:"edge"`
+	Clipboard    *bool  `toml:"clipboard"` // nil = unset, treated as enabled
 }
 
 func Load(path string) (*Config, error) {
@@ -56,4 +57,10 @@ func Load(path string) (*Config, error) {
 
 func (c *Config) MessagePort() int {
 	return c.Port + 1
+}
+
+// ClipboardEnabled reports whether clipboard sharing should run. An absent
+// clipboard key keeps it enabled, preserving the prior default behavior.
+func (c *Config) ClipboardEnabled() bool {
+	return c.Clipboard == nil || *c.Clipboard
 }

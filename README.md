@@ -170,6 +170,7 @@ For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 | `remote_width` | 1920 | Remote screen width in pixels |
 | `remote_height` | 1080 | Remote screen height in pixels |
 | `edge` | left | Screen edge for switching: `left` or `right` |
+| `clipboard` | true | Clipboard sync: set `false` to disable text/image sharing |
 
 ### CLI Flags
 
@@ -177,6 +178,7 @@ For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 |------|---------|-------------|
 | `-bidi` | false | Enable bidirectional input (Linux → Windows) |
 | `-edge` | *(from config)* | Override edge from config: `left` or `right` |
+| `-no-clipboard` | false | Disable clipboard sharing (overrides config) |
 | `-debug` | false | Enable debug logging |
 | `-config` | ~/.config/mwb/config.toml | Config file path |
 
@@ -196,6 +198,11 @@ Run the setup permissions commands above, then log out and back in.
 
 ### Clipboard not syncing
 Ensure `xclip` is installed: `sudo apt install xclip`
+
+### Disable clipboard sharing
+Set `clipboard = false` in `config.toml`, or run with `-no-clipboard`. The Linux
+client then never reads or writes the local clipboard, so it won't override what
+you copied on Windows.
 
 ### Mouse controls both screens simultaneously
 Run with `-bidi` flag and `sudo` for device isolation via xinput.

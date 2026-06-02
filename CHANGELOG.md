@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Clipboard sharing can now be disabled: `clipboard = false` in `config.toml`
+  or the `-no-clipboard` flag (flag overrides config). Default stays enabled.
+  When off, the client never starts the clipboard manager, so it won't override
+  the Windows clipboard. Resolves #12.
 - X-button support (back/forward): `BTN_SIDE`/`BTN_EXTRA` registered on virtual
   mouse, `WM_XBUTTONDOWN`/`WM_XBUTTONUP` handled in input handler.
 - Horizontal scroll: `REL_HWHEEL` registered, `WM_MOUSEHWHEEL` handled —

@@ -25,6 +25,7 @@ func main() {
 	debug := flag.Bool("debug", false, "enable debug logging")
 	edgeSide := flag.String("edge", "", "screen edge to switch: left or right (overrides config)")
 	bidirectional := flag.Bool("bidi", false, "enable bidirectional input (send local input to remote)")
+	noClipboard := flag.Bool("no-clipboard", false, "disable clipboard sharing (overrides config)")
 	flag.Parse()
 
 	level := slog.LevelInfo
@@ -55,8 +56,12 @@ func main() {
 		*edgeSide = "right" // final fallback
 	}
 
+	// Clipboard runs by default. Either config (clipboard = false) or the
+	// --no-clipboard flag disables it; the flag wins over config.
+	clipboardEnabled := cfg.ClipboardEnabled() && !*noClipboard
+
 	slog.Debug("debug logging enabled")
-	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional, "edge", *edgeSide)
+	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional, "edge", *edgeSide, "clipboard", clipboardEnabled)
 
 	mouse, err := input.CreateVirtualMouse("mwb-mouse")
 	if err != nil {
@@ -124,10 +129,13 @@ func main() {
 				slog.Info("connected (inbound)", "remote", conn.RemoteName)
 			}
 
-			// Start clipboard sharing — use the auto-detected display
-			clipMgr := clipboard.NewManager(conn, capture.DetectDisplay())
-			handler.Clipboard = clipMgr
-			clipMgr.Start()
+			// Start clipboard sharing on the auto-detected display unless disabled.
+			var clipMgr *clipboard.Manager
+			if clipboardEnabled {
+				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay())
+				handler.Clipboard = clipMgr
+				clipMgr.Start()
+			}
 
 			// Start bidirectional capture if enabled
 			var cap *capture.Capturer
@@ -186,7 +194,9 @@ func main() {
 				cap.Stop()
 			}
 
-			clipMgr.Stop() // waits for goroutine via WaitGroup
+			if clipMgr != nil {
+				clipMgr.Stop() // waits for goroutine via WaitGroup
+			}
 
 			_ = conn.Close()
 			slog.Info("disconnected, will reconnect in 100ms")

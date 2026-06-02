@@ -59,6 +59,62 @@ key = "SomeKeyHere!1234"
 	}
 }
 
+func TestClipboardEnabledDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ClipboardEnabled() {
+		t.Error("clipboard should default to enabled when the key is absent")
+	}
+}
+
+func TestClipboardDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+clipboard = false
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClipboardEnabled() {
+		t.Error("clipboard = false should disable clipboard sharing")
+	}
+}
+
+func TestClipboardEnabledExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+clipboard = true
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ClipboardEnabled() {
+		t.Error("clipboard = true should enable clipboard sharing")
+	}
+}
+
 func TestLoadConfigValidation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
