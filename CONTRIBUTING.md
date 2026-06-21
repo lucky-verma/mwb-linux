@@ -9,7 +9,7 @@ Thank you for your interest in contributing! Here's how to get started.
 git clone https://github.com/lucky-verma/mwb-linux.git
 cd mwb-linux
 
-# Install Go 1.24+
+# Install Go 1.25+ (see go.mod for the exact version)
 # https://go.dev/dl/
 
 # Install dev dependencies

@@ -2,111 +2,95 @@
 
 ## Overview
 
-This is a Linux client for Microsoft PowerToys Mouse Without Borders (MWB) that enables **bidirectional** keyboard and mouse sharing between a Linux PC and a Windows laptop over the local network. It is the first implementation of MWB host-mode from a non-Windows client.
+This is a Linux client for Microsoft PowerToys Mouse Without Borders (MWB) that enables **bidirectional** keyboard and mouse sharing between a Linux PC and a Windows laptop over the local network. It implements MWB host-mode (sending input, not just receiving) from Linux, building on the receive-only [bketelsen/mwb](https://github.com/bketelsen/mwb) client.
 
 ## How It Works
 
+```mermaid
+flowchart LR
+    subgraph LX["🐧 <b>Linux PC</b>"]
+        direction TB
+        DEV["🖱️ Mouse · ⌨️ Keyboard<br/>(evdev)"]
+        CAP["<b>capture</b><br/>edge detect · xinput isolation"]
+        NET["<b>protocol · network</b><br/>AES-256-CBC"]
+        UIN["<b>uinput</b><br/>virtual mouse + keyboard"]
+        DEV --> CAP --> NET
+        NET --> UIN
+    end
+    subgraph WN["🪟 <b>Windows PC</b>"]
+        direction TB
+        PT["<b>PowerToys MWB</b><br/>(server / host)<br/>InputHook · SendInput · Receiver"]
+    end
+    NET <-->|" 🖱️ Mouse · ⌨️ Keyboard · 📋 Clipboard<br/>TCP :15101 "| PT
 ```
-  Ubuntu PC (Linux)                         Work Laptop (Windows)
-  ┌─────────────────┐                      ┌─────────────────────┐
-  │  Mouse    │──evdev──┐            │  PowerToys MWB      │
-  │  Keyboard     │──evdev──┤            │  (Server/Host)      │
-  │                 │         │            │                     │
-  │  mwb client     │◄────────┘            │  Receiver.cs        │
-  │  ┌───────────┐  │    TCP/AES-256-CBC   │  ┌───────────────┐  │
-  │  │ capture   │──┼──── Mouse/KB pkts ──►│  │ SendInput()   │  │
-  │  │ handler   │◄─┼──── Mouse/KB pkts ──◄│  │ InputHook     │  │
-  │  │ protocol  │  │    Port 15101        │  │ MachineStuff  │  │
-  │  └───────────┘  │                      │  └───────────────┘  │
-  │                 │                      │                     │
-  │  uinput virtual │                      │  Touchpad/Keyboard  │
-  │  mouse+keyboard │                      │  (physical)         │
-  └─────────────────┘                      └─────────────────────┘
-```
+
+Local input is read from `evdev`, forwarded to Windows as encrypted MWB packets,
+and incoming Windows input is injected through a `uinput` virtual device.
 
 ## Connection Lifecycle
 
-### 1. TCP Connect + Encryption Setup
-
-```
-Linux                          Windows
-  │                               │
-  ├──TCP dial :15101──────────────►│
-  │                               │
-  ├──16 random bytes (IV seed)───►│  AES-256-CBC streams established
-  │◄──16 random bytes (IV seed)───┤  using PBKDF2-SHA512 derived key
-  │                               │
+```mermaid
+sequenceDiagram
+    participant L as 🐧 Linux
+    participant W as 🪟 Windows
+    rect rgb(236, 244, 255)
+        note over L,W: 1 · TCP connect + encryption
+        L->>W: TCP dial :15101
+        L->>W: 16-byte IV seed
+        W->>L: 16-byte IV seed
+        note over L,W: AES-256-CBC streams up
+    end
+    rect rgb(240, 255, 240)
+        note over L,W: 2 · Handshake
+        L->>W: 10× Handshake (128-bit challenge)
+        W->>L: 10× Handshake (challenge)
+        L->>W: HandshakeAck (Machine1-4 = ~server)
+        W->>L: HandshakeAck (Machine1-4 = ~ours)
+        L->>W: HeartbeatEx (Des=255) → AddToMachinePool()
+    end
+    rect rgb(255, 248, 235)
+        note over L,W: 3 · Steady state
+        W->>L: Matrix·Hi — request machine layout
+        L->>W: Hello — confirm presence
+        loop every 5s
+            W->>L: HeartbeatEx (keep-alive)
+            L->>W: HeartbeatEx (with machine name)
+        end
+    end
 ```
 
 **Key derivation**: `PBKDF2(SHA512, securityKey, UTF16LE("18446744073709551615"), 50000 iterations) → 32-byte AES key`
 
 **Fixed IV**: ASCII bytes of `"1844674407370955"` (first 16 chars of uint64.MaxValue)
 
-### 2. Handshake
-
-```
-Linux                          Windows
-  │                               │
-  ├──10x Handshake(126)──────────►│  Contains random 128-bit challenge
-  │◄──10x Handshake(126)─────────┤  Contains server's random challenge
-  │                               │
-  ├──HandshakeAck(127)───────────►│  Machine1-4 = ~server.Machine1-4
-  │◄──HandshakeAck(127)──────────┤  Machine1-4 = ~our.Machine1-4
-  │                               │
-  ├──HeartbeatEx(51, Des=255)────►│  Triggers AddToMachinePool()
-  │                               │
-```
-
-### 3. Steady State — Heartbeats & Matrix
-
-```
-Linux                          Windows
-  │                               │
-  │◄──Matrix|Hi(130)──────────────┤  Server asks for machine layout info
-  ├──Hello(3)─────────────────────►│  We confirm our presence
-  │                               │
-  │◄──HeartbeatEx(51)─────────────┤  Keep-alive
-  ├──HeartbeatEx(51)──────────────►│  Echo back with our machine name
-  │                               │
-```
-
 ## Cursor Switching Protocol
 
-### Direction: Windows → Linux (Touchpad)
-
-```
-1. User moves touchpad to right edge of Windows screen
-2. Server detects edge via MoveToMyNeighbourIfNeeded()
-3. Server calls PrepareToSwitchToMachine(linuxID)
-4. Server sends MachineSwitched(77) to Linux
-5. Server starts sending Mouse(123) packets with relative coords (±100000)
-6. Linux handler injects mouse via uinput virtual device
-7. Linux cursor moves on screen
-```
-
-### Direction: Linux → Windows (Mouse)
-
-```
-1. mwb polls cursor position via xdotool every 50ms
-2. Cursor hits left edge (x=0)
-3. mwb disables local device in X11 via xinput (Ubuntu stops receiving input)
-4. mwb sends burst of absolute Mouse(123) packets to server center (32767,32767)
-5. Server's Receiver.cs processes Mouse with Des==MachineID:
-   - Forces desMachineID = self (self-reclaim)
-   - Calls InputSimulation.SendMouse() → Win32 SendInput
-   - Cursor appears on Windows
-6. mwb forwards local device evdev events as absolute Mouse packets (0-65535 coords)
-7. Virtual cursor (remoteX/remoteY) tracks position on remote
-```
-
-### Direction: Linux → Windows → Back to Linux (Return)
-
-```
-1. Virtual cursor remoteX reaches remoteWidth (right edge of remote)
-2. mwb re-enables local device in X11 via xinput
-3. mwb moves local cursor to Ubuntu center via xdotool
-4. mwb sets active=true, clears switchSent
-5. local mouse now controls Ubuntu again
+```mermaid
+sequenceDiagram
+    participant L as 🐧 Linux (mwb)
+    participant W as 🪟 Windows (MWB)
+    rect rgb(240, 255, 240)
+        note over L,W: Windows → Linux
+        W->>W: touchpad hits shared edge → MoveToMyNeighbourIfNeeded()
+        W->>L: MachineSwitched(77)
+        W->>L: Mouse(123) — relative coords (±100000)
+        L->>L: inject via uinput → Linux cursor moves
+    end
+    rect rgb(236, 244, 255)
+        note over L,W: Linux → Windows
+        L->>L: edge poll (10ms) → cursor hits edge
+        L->>L: xinput disable (isolate local device)
+        L->>W: Mouse(123) burst → entry position (proportional Y, just inside edge)
+        W->>W: Receiver self-reclaim → SendMouse() → Win32 SendInput
+        L->>W: evdev deltas → absolute Mouse(123) (0–65535)
+        note over L: virtual cursor (remoteX/remoteY) tracks remote
+    end
+    rect rgb(255, 248, 235)
+        note over L,W: return to Linux
+        L->>L: virtual cursor reaches far edge (remoteWidth/Height)
+        L->>L: xinput enable + recenter cursor (xdotool)
+        note over L: active=true, switchSent cleared → local mouse controls Linux
+    end
 ```
 
 ## Packet Wire Format
@@ -191,9 +175,12 @@ With "Move mouse relatively" **OFF** on the server, absolute mode avoids bounce-
 When controlling the remote, `xinput disable` prevents the local device from moving the Ubuntu cursor. `xinput enable` restores it when returning. This is more reliable than EVIOCGRAB which had issues with device restoration.
 
 ### 7. Timing and Debouncing
-- **Edge detection cooldown**: 2 seconds between switches
-- **Arrival cooldown**: 3 seconds after cursor arrives before checking edges
-- **Switch grace**: 500ms evdev suppression after sending switch packets
+- **Edge polling**: 10ms ticker (`pollCursorEdge`, `capture_linux.go`)
+- **Switch gating**: `canSwitch`/`canReturn` gates prevent re-trigger loops — no
+  time-based cooldown. The cursor must move away from the edge before another
+  switch can fire. A 100ms `lastSwitch` debounce guards against rapid double-fire.
+- **Switch grace**: 100ms evdev suppression after sending switch packets
+  (`handleEvent`, `capture_linux.go`)
 
 ## Package Structure
 
