@@ -1,0 +1,5 @@
+mwb-linux (0.4.0-1) UNRELEASED; urgency=medium
+
+  * Initial Debian packaging.
+
+ -- Lucky Verma <lucky-verma@users.noreply.github.com>  Sun, 21 Jun 2026 09:15:00 +0000

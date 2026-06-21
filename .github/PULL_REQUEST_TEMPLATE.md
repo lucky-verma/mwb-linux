@@ -25,6 +25,8 @@
 
 ## Checklist
 
+- [ ] Public text and metadata do not include private hostnames, usernames, machine names, internal paths, private domains, or personal email addresses
+- [ ] Package/release metadata uses an intentional public contact address
 - [ ] No mutex held when calling a method that also acquires that mutex
 - [ ] `enableXinput()` only called when `disabledXinputIDs` is non-empty OR as cleanup
 - [ ] `parseXinputIDs` / `getXinputIDs` excludes `[floating slave]` devices

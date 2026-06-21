@@ -38,7 +38,7 @@ nfpms:
     file_name_template: "mwb-linux_{{ .Version }}_{{ .Arch }}"
     vendor: Lucky Verma
     homepage: https://github.com/lucky-verma/mwb-linux
-    maintainer: Lucky Verma <lucky@thinkersloop.com>
+    maintainer: Lucky Verma <lucky-verma@users.noreply.github.com>
     description: |-
       Mouse Without Borders for Linux.
       Share keyboard, mouse, and clipboard seamlessly between Linux and

@@ -1,0 +1,72 @@
+.TH MWB 1 "2026-06-21" "mwb-linux" "User Commands"
+.SH NAME
+mwb \- Linux client compatible with PowerToys Mouse Without Borders
+.SH SYNOPSIS
+.B mwb
+.RI [ options ]
+.SH DESCRIPTION
+.B mwb
+connects a Linux desktop to a Windows machine running Microsoft PowerToys
+Mouse Without Borders. It can receive mouse, keyboard, and clipboard events
+from Windows, and in bidirectional mode it can forward Linux mouse and keyboard
+input back to Windows.
+.PP
+Bidirectional input currently depends on X11 tools for edge detection and
+device isolation. Receive-only operation can work without those X11 controls.
+.SH OPTIONS
+.TP
+.B \-bidi
+Enable bidirectional input forwarding from Linux to Windows.
+.TP
+.BI \-config " path"
+Read configuration from
+.IR path .
+The default is
+.IR ~/.config/mwb/config.toml .
+.TP
+.B \-debug
+Enable debug logging.
+.TP
+.BI \-edge " left|right"
+Set the local screen edge used to switch to the remote machine. This overrides
+the configuration file.
+.TP
+.B \-no-clipboard
+Disable clipboard sharing. This overrides the configuration file.
+.SH CONFIGURATION
+The configuration file is TOML. Required fields are:
+.TP
+.B host
+IP address or hostname of the Windows machine.
+.TP
+.B key
+Security key from PowerToys Mouse Without Borders.
+.TP
+.B name
+Display name for the Linux machine.
+.PP
+Optional fields include
+.BR port ,
+.BR remote_width ,
+.BR remote_height ,
+.BR edge ,
+.BR clipboard ,
+.BR accel_multiplier ,
+and
+.BR inbound_multiplier .
+.SH EXAMPLES
+.EX
+mwb -bidi -edge left
+mwb -config ~/.config/mwb/config.toml
+.EE
+.SH FILES
+.TP
+.I ~/.config/mwb/config.toml
+Default per-user configuration file.
+.TP
+.I /usr/lib/systemd/user/mwb.service
+Systemd user service installed by the Debian package.
+.SH SEE ALSO
+.BR xinput (1),
+.BR xdotool (1),
+.BR xclip (1)

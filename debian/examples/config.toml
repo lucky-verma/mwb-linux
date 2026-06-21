@@ -1,0 +1,13 @@
+# MWB Linux Configuration
+# Get the security key from PowerToys -> Mouse Without Borders on Windows.
+
+host = "192.168.1.100"        # Windows machine IP address
+key = "YourSecurityKey"       # Security key from PowerToys MWB
+name = "linux"                # This machine's name (max 15 chars)
+# port = 15100                # Base port (default 15100)
+# remote_width = 1920         # Remote screen width in pixels
+# remote_height = 1080        # Remote screen height in pixels
+# edge = "left"               # Screen edge for switching: "left" or "right"
+# clipboard = true            # Set false to disable clipboard sync
+# accel_multiplier = 2.0      # Linux -> Windows cursor speed
+# inbound_multiplier = 1.0    # Windows -> Linux cursor speed

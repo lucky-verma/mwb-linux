@@ -1,0 +1,14 @@
+[Unit]
+Description=Mouse Without Borders Linux client
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mwb -bidi -edge left
+Restart=on-failure
+RestartSec=5
+# DISPLAY and XAUTHORITY are auto-detected by the mwb binary.
+
+[Install]
+WantedBy=default.target

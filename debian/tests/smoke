@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+mwb -h 2>&1 | grep -q -- "-bidi"
