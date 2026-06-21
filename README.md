@@ -35,7 +35,7 @@ flowchart LR
 
 > Move your mouse to the screen edge — the cursor seamlessly jumps to the other machine.
 
-No extra software needed on Windows — just PowerToys, which is already installed on millions of machines.
+No extra software needed on Windows beyond PowerToys, which bundles Mouse Without Borders.
 
 ## Features
 
