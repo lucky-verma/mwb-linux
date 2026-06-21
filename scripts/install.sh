@@ -41,7 +41,7 @@ if command -v go &> /dev/null; then
     chmod +x /usr/local/bin/mwb
     echo "  Installed to /usr/local/bin/mwb"
 else
-    echo "  Go not found. Please install Go 1.24+ and run 'make build && sudo make install'"
+    echo "  Go not found. Please install Go 1.25+ and run 'make build && sudo make install'"
 fi
 
 # Create default config
