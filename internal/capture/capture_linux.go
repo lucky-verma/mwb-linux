@@ -837,9 +837,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
 		c.canSwitch = false // block re-trigger until cursor moves away from edge
-		c.mu.Unlock()
-
-		// Move cursor away from edge SYNCHRONOUSLY before enabling xinput
+		// Compute the off-edge entry point while still holding the lock.
 		var entryX int32
 		if c.edgeSide == "left" {
 			entryX = 100
@@ -847,15 +845,25 @@ func (c *Capturer) handleRel(ev inputEvent) {
 			entryX = c.screen.Width - 100
 		}
 		entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-			fmt.Sprintf("%d", entryX),
-			fmt.Sprintf("%d", entryY))
-		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
-		cancel()
+		c.mu.Unlock()
 
+		// Release isolation FIRST so the local mouse is live the instant control
+		// returns. Holding the EVIOCGRAB across the cursor warp (xdotool can take
+		// hundreds of ms) froze the mouse on return. canSwitch is already false,
+		// so the brief window before the warp lands cannot re-trigger a switch.
 		c.releaseInput()
+
+		// Warp the cursor off the edge asynchronously — a slow xdotool must never
+		// block the evdev read loop (mirrors the OnActivated/OnReclaimed paths).
+		go func(x, y int32) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
+				fmt.Sprintf("%d", x), fmt.Sprintf("%d", y))
+			cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
+			_ = cmd.Run()
+		}(entryX, entryY)
+
 		c.mu.Lock()
 		return
 	}
