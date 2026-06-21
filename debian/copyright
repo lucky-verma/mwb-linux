@@ -2,6 +2,7 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: mwb-linux
 Upstream-Contact: Lucky Verma <lucky-verma@users.noreply.github.com>
 Source: https://github.com/lucky-verma/mwb-linux
+Files-Excluded: debian
 
 Files: *
 Copyright: 2026 Lucky Verma
