@@ -87,8 +87,9 @@ func main() {
 	slog.Info("virtual input devices created")
 
 	handler := &network.Handler{
-		Mouse:    mouse,
-		Keyboard: keyboard,
+		Mouse:             mouse,
+		Keyboard:          keyboard,
+		InboundMultiplier: cfg.InboundMultiplier,
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -153,6 +154,9 @@ func main() {
 				// coordinate mapping is correct for non-1080p Windows displays.
 				cap.SetRemoteScreen(int32(cfg.RemoteWidth), int32(cfg.RemoteHeight))
 				slog.Info("remote screen configured", "width", cfg.RemoteWidth, "height", cfg.RemoteHeight)
+				// Cursor speed: the only acceleration knob lives here (Windows
+				// applies none of its own), so honor the configured multiplier.
+				cap.SetAccelMultiplier(cfg.AccelMultiplier)
 
 				// When we receive MachineSwitched, mark ourselves as active and
 				// move cursor away from edge — without this the cursor stays at

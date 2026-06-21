@@ -22,6 +22,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
      unaffected throughout because XTest bypasses libinput.
 
 ### Added
+- Configurable cursor speed: `accel_multiplier` in `config.toml` (default 2.0)
+  scales raw evdev deltas when controlling Windows. The Windows side applies no
+  acceleration of its own (absolute positioning), so this is the only speed
+  knob — lower it (e.g. `1.0`, `0.5`) if the cursor feels too fast. Resolves #15.
+- Inbound cursor speed: `inbound_multiplier` in `config.toml` (default 1.0)
+  scales Windows-to-Linux cursor deltas. `1.0` preserves exact mirroring; raise
+  it when inbound movement feels too slow.
 - Clipboard sharing can now be disabled: `clipboard = false` in `config.toml`
   or the `-no-clipboard` flag (flag overrides config). Default stays enabled.
   When off, the client never starts the clipboard manager, so it won't override
@@ -84,6 +91,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `New()` no longer calls `enableXinput()` unconditionally.
 - `parseXinputIDs` is now a standalone testable function separate from the
   `xinput` subprocess call.
+
+### Documentation
+- `docs/ARCHITECTURE.md`: replaced ASCII diagrams with Mermaid (component flow,
+  connection lifecycle, cursor switching) matching the README theme. Corrected
+  stale values to match the code: edge poll 10ms (was 50ms), switch grace 100ms
+  (was 500ms), `canSwitch`/`canReturn` gates instead of the old 2s/3s cooldowns,
+  and edge-based entry position (was "center"). Softened the "first
+  implementation" claim.
+- `README.md`: documented the new cursor-speed config options and corrected the
+  cursor-speed/drift limitation note.
+- `CONTRIBUTING.md`: Go version requirement bumped to 1.25+ to match `go.mod`.
 
 ## [0.3.1] - 2026-04-12
 

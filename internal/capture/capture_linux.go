@@ -35,6 +35,10 @@ const (
 	// Default remote screen dimensions — auto-detected from incoming packets
 	defaultRemoteWidth  = 1920
 	defaultRemoteHeight = 1080
+
+	// Default scaling applied to raw evdev deltas. Approximates libinput's flat
+	// profile (speed 0.766 → ~1.766, rounded to 2). Overridable via config.
+	defaultAccelMultiplier = 2.0
 )
 
 type inputEvent struct {
@@ -53,27 +57,28 @@ type ScreenInfo struct {
 
 // Capturer monitors input and forwards events to the remote MWB host.
 type Capturer struct {
-	conn          *network.Conn
-	screen        ScreenInfo
-	active        bool   // true = cursor is on this machine
-	edgeSide      string // "left" or "right"
-	mu            sync.Mutex
-	stopCh        chan struct{}
-	wg            sync.WaitGroup // tracks all goroutines for clean Stop()
-	deviceFiles   []*os.File     // open /dev/input/event* fds — closed on Stop() to unblock f.Read
-	lastSwitch    time.Time      // debounce outgoing switches
-	switchSent    time.Time      // when we last sent switch packets
-	lastActivated time.Time      // when cursor last arrived on this machine
-	remoteX       int32          // virtual cursor position on remote (pixels)
-	remoteY       int32          // virtual cursor position on remote (pixels)
-	remoteW       int32          // detected remote screen width
-	remoteH       int32          // detected remote screen height
-	edgeY         int32          // Y position where cursor left local screen
-	canSwitch         bool       // true once cursor has been away from edge since activation
-	canReturn         bool       // true once cursor has moved away from the remote return edge
-	hotkeyCtrl        bool       // tracks Ctrl key state for hotkey detection
-	hotkeyAlt         bool       // tracks Alt key state for hotkey detection
-	disabledXinputIDs []int      // device IDs we disabled — re-enable same set to avoid TOCTOU
+	conn              *network.Conn
+	screen            ScreenInfo
+	active            bool   // true = cursor is on this machine
+	edgeSide          string // "left" or "right"
+	mu                sync.Mutex
+	stopCh            chan struct{}
+	wg                sync.WaitGroup // tracks all goroutines for clean Stop()
+	deviceFiles       []*os.File     // open /dev/input/event* fds — closed on Stop() to unblock f.Read
+	lastSwitch        time.Time      // debounce outgoing switches
+	switchSent        time.Time      // when we last sent switch packets
+	lastActivated     time.Time      // when cursor last arrived on this machine
+	remoteX           int32          // virtual cursor position on remote (pixels)
+	remoteY           int32          // virtual cursor position on remote (pixels)
+	remoteW           int32          // detected remote screen width
+	remoteH           int32          // detected remote screen height
+	accelMult         float64        // scaling applied to raw evdev deltas (config: accel_multiplier)
+	edgeY             int32          // Y position where cursor left local screen
+	canSwitch         bool           // true once cursor has been away from edge since activation
+	canReturn         bool           // true once cursor has moved away from the remote return edge
+	hotkeyCtrl        bool           // tracks Ctrl key state for hotkey detection
+	hotkeyAlt         bool           // tracks Alt key state for hotkey detection
+	disabledXinputIDs []int          // device IDs we disabled — re-enable same set to avoid TOCTOU
 }
 
 // New creates a new input capturer.
@@ -89,6 +94,7 @@ func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 		stopCh:    make(chan struct{}),
 		remoteW:   defaultRemoteWidth,
 		remoteH:   defaultRemoteHeight,
+		accelMult: defaultAccelMultiplier,
 		canSwitch: true, // allow first switch immediately
 	}
 }
@@ -157,6 +163,19 @@ func (c *Capturer) SetRemoteScreen(w, h int32) {
 		c.remoteH = h
 		slog.Info("remote screen dimensions updated", "width", w, "height", h)
 	}
+}
+
+// SetAccelMultiplier sets the scaling applied to raw evdev deltas before they
+// move the remote cursor. Non-positive values are ignored so the default is
+// never clobbered by an unset/invalid config value.
+func (c *Capturer) SetAccelMultiplier(m float64) {
+	if m <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.accelMult = m
+	slog.Info("cursor acceleration multiplier set", "accel_multiplier", m)
 }
 
 // Stop signals the capturer to stop, waits for all goroutines to exit,
@@ -643,14 +662,12 @@ func (c *Capturer) handleEvent(ev inputEvent) {
 	}
 }
 
-// applyAcceleration scales raw evdev deltas to approximate libinput's flat profile.
-// libinput flat profile: output = input * (1 + speed_setting)
-// With accel speed 0.766: multiplier = 1.766
-// We round to ~2x which is a good general default.
-const accelMultiplier = 2.0
-
-func applyAcceleration(delta int32) int32 {
-	scaled := float64(delta) * accelMultiplier
+// applyAcceleration scales raw evdev deltas by mult. The Windows side does no
+// acceleration of its own (absolute positioning), so mult is the only
+// cursor-speed control. Sub-pixel results are clamped to ±1 so slow movements
+// still register and the cursor can always reach the return edge.
+func applyAcceleration(delta int32, mult float64) int32 {
+	scaled := float64(delta) * mult
 	if scaled > 0 && scaled < 1 {
 		return 1
 	}
@@ -666,7 +683,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 
 	switch ev.Code {
 	case relX:
-		c.remoteX += applyAcceleration(ev.Value)
+		c.remoteX += applyAcceleration(ev.Value, c.accelMult)
 		if c.remoteX < 0 {
 			c.remoteX = 0
 		}
@@ -674,7 +691,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 			c.remoteX = c.remoteW
 		}
 	case relY:
-		c.remoteY += applyAcceleration(ev.Value)
+		c.remoteY += applyAcceleration(ev.Value, c.accelMult)
 		if c.remoteY < 0 {
 			c.remoteY = 0
 		}
@@ -823,9 +840,6 @@ func (c *Capturer) handleKey(ev inputEvent) {
 	}
 
 	// Keyboard
-	if ev.Value == 2 {
-		return // skip repeat
-	}
 	if c.IsActive() {
 		return
 	}
@@ -835,6 +849,10 @@ func (c *Capturer) handleKey(ev inputEvent) {
 		return
 	}
 
+	// evdev value: 1 = press, 2 = auto-repeat, 0 = release. Forward repeats as
+	// keydowns — an injected key does not auto-repeat on Windows, so a held key
+	// only repeats if we resend the press (mirrors MWB's own keyboard hook,
+	// which emits a WM_KEYDOWN per hardware repeat).
 	var dwFlags int32
 	if ev.Value == 0 {
 		dwFlags = protocol.LLKHF_UP

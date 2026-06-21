@@ -17,6 +17,16 @@ type Config struct {
 	RemoteHeight int    `toml:"remote_height"`
 	Edge         string `toml:"edge"`
 	Clipboard    *bool  `toml:"clipboard"` // nil = unset, treated as enabled
+
+	// AccelMultiplier scales raw evdev deltas before they move the remote cursor
+	// (outbound, Linux->Windows). The Windows side adds no acceleration of its
+	// own, so this is the only outbound speed knob. <= 0 means unset.
+	AccelMultiplier float64 `toml:"accel_multiplier"`
+
+	// InboundMultiplier scales Windows->Linux cursor movement (the inbound,
+	// absolute-mirror direction). 1.0 mirrors Windows 1:1; raise it for a faster
+	// local cursor when Windows is in control. <= 0 means unset (defaults to 1).
+	InboundMultiplier float64 `toml:"inbound_multiplier"`
 }
 
 func Load(path string) (*Config, error) {
@@ -48,6 +58,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.RemoteHeight == 0 {
 		cfg.RemoteHeight = 1080
+	}
+	if cfg.AccelMultiplier <= 0 {
+		cfg.AccelMultiplier = 2.0
+	}
+	if cfg.InboundMultiplier <= 0 {
+		cfg.InboundMultiplier = 1.0
 	}
 	if cfg.Edge == "" {
 		cfg.Edge = "left"
