@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/lucky-verma/mwb-linux/internal/input"
@@ -53,27 +54,29 @@ type ScreenInfo struct {
 
 // Capturer monitors input and forwards events to the remote MWB host.
 type Capturer struct {
-	conn          *network.Conn
-	screen        ScreenInfo
-	active        bool   // true = cursor is on this machine
-	edgeSide      string // "left" or "right"
-	mu            sync.Mutex
-	stopCh        chan struct{}
-	wg            sync.WaitGroup // tracks all goroutines for clean Stop()
-	deviceFiles   []*os.File     // open /dev/input/event* fds — closed on Stop() to unblock f.Read
-	lastSwitch    time.Time      // debounce outgoing switches
-	switchSent    time.Time      // when we last sent switch packets
-	lastActivated time.Time      // when cursor last arrived on this machine
-	remoteX       int32          // virtual cursor position on remote (pixels)
-	remoteY       int32          // virtual cursor position on remote (pixels)
-	remoteW       int32          // detected remote screen width
-	remoteH       int32          // detected remote screen height
-	edgeY         int32          // Y position where cursor left local screen
-	canSwitch         bool       // true once cursor has been away from edge since activation
-	canReturn         bool       // true once cursor has moved away from the remote return edge
-	hotkeyCtrl        bool       // tracks Ctrl key state for hotkey detection
-	hotkeyAlt         bool       // tracks Alt key state for hotkey detection
-	disabledXinputIDs []int      // device IDs we disabled — re-enable same set to avoid TOCTOU
+	conn              *network.Conn
+	screen            ScreenInfo
+	active            bool   // true = cursor is on this machine
+	edgeSide          string // "left" or "right"
+	mu                sync.Mutex
+	stopCh            chan struct{}
+	wg                sync.WaitGroup // tracks all goroutines for clean Stop()
+	deviceFiles       []*os.File     // open /dev/input/event* fds — closed on Stop() to unblock f.Read
+	lastSwitch        time.Time      // debounce outgoing switches
+	switchSent        time.Time      // when we last sent switch packets
+	lastActivated     time.Time      // when cursor last arrived on this machine
+	remoteX           int32          // virtual cursor position on remote (pixels)
+	remoteY           int32          // virtual cursor position on remote (pixels)
+	remoteW           int32          // detected remote screen width
+	remoteH           int32          // detected remote screen height
+	edgeY             int32          // Y position where cursor left local screen
+	canSwitch         bool           // true once cursor has been away from edge since activation
+	canReturn         bool           // true once cursor has moved away from the remote return edge
+	hotkeyCtrl        bool           // tracks Ctrl key state for hotkey detection
+	hotkeyAlt         bool           // tracks Alt key state for hotkey detection
+	disabledXinputIDs []int          // device IDs we disabled — re-enable same set to avoid TOCTOU
+	grabbedFiles      []*os.File     // evdev fds currently EVIOCGRAB'd — ungrab the same set on release
+	xinputFallback    bool           // true if this isolation cycle also used xinput disable (grab gap)
 }
 
 // New creates a new input capturer.
@@ -109,10 +112,11 @@ func (c *Capturer) SetActive(active bool) {
 		c.canReturn = false // must move away from remote edge before next return switch
 	}
 	c.mu.Unlock()
-	// enableXinput acquires c.mu internally — must be called after unlock.
-	// Calling it under the lock caused a deadlock that froze all goroutines.
+	// releaseInput acquires c.mu internally (and may call enableXinput) — must be
+	// called after unlock. Calling it under the lock caused a deadlock that froze
+	// all goroutines.
 	if shouldEnable {
-		c.enableXinput()
+		c.releaseInput()
 	}
 }
 
@@ -172,14 +176,10 @@ func (c *Capturer) Stop() {
 	}
 	c.mu.Unlock()
 	c.wg.Wait()
-	// Only re-enable if WE disabled them — avoids calling xinput enable on
-	// floating/unmanaged devices which can corrupt their attachment state.
-	c.mu.Lock()
-	hasDisabled := len(c.disabledXinputIDs) > 0
-	c.mu.Unlock()
-	if hasDisabled {
-		c.enableXinput()
-	}
+	// Always release isolation on teardown: ungrab any EVIOCGRAB'd devices (a
+	// leftover grab would leave the machine with no input) and re-enable any
+	// xinput devices the fallback disabled.
+	c.releaseInput()
 }
 
 // Run starts edge detection polling and evdev monitoring.
@@ -310,8 +310,9 @@ func (c *Capturer) pollCursorEdge() {
 				c.canReturn = false // must move away from return edge first
 				c.mu.Unlock()
 
-				// Disable local input in X11 (synchronous — only takes ~2ms)
-				c.disableXinput()
+				// Isolate local input (EVIOCGRAB, xinput fallback) so it drives
+				// the remote only, not the local X session.
+				c.isolateInput()
 
 				// Send mouse burst to the entry position on remote
 				// Multiple packets help Windows MWB register the switch reliably
@@ -526,6 +527,86 @@ func parseXinputIDs(output string) []int {
 		}
 	}
 	return ids
+}
+
+// eviocgrab is EVIOCGRAB = _IOW('E', 0x90, int): take/release an exclusive
+// grab on an evdev device. While grabbed, the kernel delivers that device's
+// events only to the grabbing fd, so X (and the compositor) see nothing.
+const eviocgrab = 0x40044590
+
+// evdevGrab grabs (grab=true) or releases (grab=false) an evdev fd.
+func evdevGrab(f *os.File, grab bool) error {
+	var v uintptr
+	if grab {
+		v = 1
+	}
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgrab), v); errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// isolateInput stops local input from reaching X while controlling the remote.
+//
+// Primary path: EVIOCGRAB the evdev fds we already hold. A grab is invisible to
+// X — it produces no XInput device-hierarchy changes — so the compositor never
+// reconfigures and the screen no longer stalls for ~2s on return. This also
+// scales with peripheral count (one ioctl each, no xinput subprocess storm) and
+// is vendor-agnostic (no Razer/Wooting name matching).
+//
+// Fallback: if any device cannot be grabbed (e.g. already grabbed by another
+// process, or an unexpected fd), layer xinput disable on top so no local input
+// leaks into X. The common case grabs everything and never touches xinput.
+func (c *Capturer) isolateInput() {
+	c.mu.Lock()
+	files := make([]*os.File, len(c.deviceFiles))
+	copy(files, c.deviceFiles)
+	c.mu.Unlock()
+
+	var grabbed []*os.File
+	failures := 0
+	for _, f := range files {
+		if err := evdevGrab(f, true); err != nil {
+			failures++
+			continue
+		}
+		grabbed = append(grabbed, f)
+	}
+
+	// Use xinput as a safety net when grabs were incomplete (or impossible).
+	fallback := failures > 0 || len(grabbed) == 0
+
+	c.mu.Lock()
+	c.grabbedFiles = grabbed
+	c.xinputFallback = fallback
+	c.mu.Unlock()
+
+	if fallback {
+		c.disableXinput()
+	}
+	slog.Info("input isolated", "grabbed", len(grabbed), "grab_failures", failures, "xinput_fallback", fallback)
+}
+
+// releaseInput reverses isolateInput: ungrab every device we grabbed and, only
+// if the xinput fallback ran, re-enable those devices. Safe (no-op) when nothing
+// is isolated, so SetActive and Stop can call it unconditionally.
+func (c *Capturer) releaseInput() {
+	c.mu.Lock()
+	grabbed := c.grabbedFiles
+	c.grabbedFiles = nil
+	fallback := c.xinputFallback
+	c.xinputFallback = false
+	c.mu.Unlock()
+
+	for _, f := range grabbed {
+		_ = evdevGrab(f, false) // best effort; fd close also releases the grab
+	}
+	if fallback {
+		c.enableXinput()
+	}
+	if len(grabbed) > 0 || fallback {
+		slog.Info("input released", "ungrabbed", len(grabbed), "xinput_fallback", fallback)
+	}
 }
 
 // disableXinput disables Razer/Wooting devices and caches which IDs were disabled
@@ -749,7 +830,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		_ = cmd.Run()
 		cancel()
 
-		c.enableXinput()
+		c.releaseInput()
 		c.mu.Lock()
 		return
 	}
@@ -823,9 +904,6 @@ func (c *Capturer) handleKey(ev inputEvent) {
 	}
 
 	// Keyboard
-	if ev.Value == 2 {
-		return // skip repeat
-	}
 	if c.IsActive() {
 		return
 	}
@@ -835,6 +913,10 @@ func (c *Capturer) handleKey(ev inputEvent) {
 		return
 	}
 
+	// evdev value: 1 = press, 2 = auto-repeat, 0 = release. Forward repeats as
+	// keydowns — an injected key does not auto-repeat on Windows, so a held key
+	// only repeats if we resend the press (mirrors MWB's own keyboard hook,
+	// which emits a WM_KEYDOWN per hardware repeat).
 	var dwFlags int32
 	if ev.Value == 0 {
 		dwFlags = protocol.LLKHF_UP
