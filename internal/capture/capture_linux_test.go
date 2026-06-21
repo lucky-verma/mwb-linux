@@ -3,7 +3,6 @@
 package capture
 
 import (
-	"os"
 	"testing"
 	"time"
 )
@@ -273,33 +272,5 @@ func TestDisabledXinputIDsCache_ClearedOnEnable(t *testing.T) {
 
 	if remaining != 0 {
 		t.Errorf("disabledXinputIDs should be cleared after enableXinput, got %d entries", remaining)
-	}
-}
-
-// --- EVIOCGRAB input isolation ---
-
-func TestEvdevGrab_NonEvdevReturnsError(t *testing.T) {
-	// EVIOCGRAB on a non-evdev fd must fail cleanly (no panic). This error path
-	// is what triggers the xinput fallback inside isolateInput.
-	f, err := os.CreateTemp(t.TempDir(), "notevdev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := evdevGrab(f, true); err == nil {
-		t.Error("evdevGrab on a regular file should return an error, got nil")
-	}
-}
-
-func TestReleaseInput_NoopWhenNothingIsolated(t *testing.T) {
-	// SetActive and Stop call releaseInput unconditionally; with nothing grabbed
-	// and no fallback it must be a no-op and never panic.
-	c := &Capturer{stopCh: make(chan struct{})}
-	c.releaseInput()
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.grabbedFiles) != 0 || c.xinputFallback {
-		t.Error("releaseInput should leave no grabbed files and no fallback flag")
 	}
 }

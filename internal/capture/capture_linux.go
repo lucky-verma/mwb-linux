@@ -15,9 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/lucky-verma/mwb-linux/internal/input"
 	"github.com/lucky-verma/mwb-linux/internal/network"
@@ -76,8 +74,6 @@ type Capturer struct {
 	hotkeyCtrl        bool           // tracks Ctrl key state for hotkey detection
 	hotkeyAlt         bool           // tracks Alt key state for hotkey detection
 	disabledXinputIDs []int          // device IDs we disabled — re-enable same set to avoid TOCTOU
-	grabbedFiles      []*os.File     // evdev fds currently EVIOCGRAB'd — ungrab the same set on release
-	xinputFallback    bool           // true if this isolation cycle also used xinput disable (grab gap)
 }
 
 // New creates a new input capturer.
@@ -113,11 +109,10 @@ func (c *Capturer) SetActive(active bool) {
 		c.canReturn = false // must move away from remote edge before next return switch
 	}
 	c.mu.Unlock()
-	// releaseInput acquires c.mu internally (and may call enableXinput) — must be
-	// called after unlock. Calling it under the lock caused a deadlock that froze
-	// all goroutines.
+	// enableXinput acquires c.mu internally — must be called after unlock.
+	// Calling it under the lock caused a deadlock that froze all goroutines.
 	if shouldEnable {
-		c.releaseInput()
+		c.enableXinput()
 	}
 }
 
@@ -177,10 +172,14 @@ func (c *Capturer) Stop() {
 	}
 	c.mu.Unlock()
 	c.wg.Wait()
-	// Always release isolation on teardown: ungrab any EVIOCGRAB'd devices (a
-	// leftover grab would leave the machine with no input) and re-enable any
-	// xinput devices the fallback disabled.
-	c.releaseInput()
+	// Only re-enable if WE disabled them — avoids calling xinput enable on
+	// floating/unmanaged devices which can corrupt their attachment state.
+	c.mu.Lock()
+	hasDisabled := len(c.disabledXinputIDs) > 0
+	c.mu.Unlock()
+	if hasDisabled {
+		c.enableXinput()
+	}
 }
 
 // Run starts edge detection polling and evdev monitoring.
@@ -311,9 +310,8 @@ func (c *Capturer) pollCursorEdge() {
 				c.canReturn = false // must move away from return edge first
 				c.mu.Unlock()
 
-				// Isolate local input (EVIOCGRAB, xinput fallback) so it drives
-				// the remote only, not the local X session.
-				c.isolateInput()
+				// Disable local input in X11 (synchronous — only takes ~2ms)
+				c.disableXinput()
 
 				// Send mouse burst to the entry position on remote
 				// Multiple packets help Windows MWB register the switch reliably
@@ -530,110 +528,6 @@ func parseXinputIDs(output string) []int {
 	return ids
 }
 
-// eviocgrab is EVIOCGRAB = _IOW('E', 0x90, int): take/release an exclusive
-// grab on an evdev device. While grabbed, the kernel delivers that device's
-// events only to the grabbing fd, so X (and the compositor) see nothing.
-const eviocgrab = 0x40044590
-
-// evdevGrab grabs (grab=true) or releases (grab=false) an evdev fd.
-func evdevGrab(f *os.File, grab bool) error {
-	var v uintptr
-	if grab {
-		v = 1
-	}
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgrab), v); errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-// eviocgname is EVIOCGNAME(256) = _IOC(_IOC_READ, 'E', 0x06, 256): read the
-// device name. Used to recognise (and skip) our own uinput virtual devices.
-const eviocgname = 0x81004506
-
-// evdevName returns the device name, or "" if it cannot be read.
-func evdevName(f *os.File) string {
-	var buf [256]byte
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgname), uintptr(unsafe.Pointer(&buf[0]))); errno != 0 {
-		return ""
-	}
-	n := 0
-	for n < len(buf) && buf[n] != 0 {
-		n++
-	}
-	return string(buf[:n])
-}
-
-// isolateInput stops local input from reaching X while controlling the remote.
-//
-// Primary path: EVIOCGRAB the evdev fds we already hold. A grab produces no
-// XInput device add/remove events, unlike re-enabling N xinput devices on
-// return. With many peripherals (e.g. ~19 Razer/Wooting sub-devices) that
-// re-enable burst empirically froze the compositor for ~2s on return; grabbing
-// never touches the X device hierarchy, so the stall is gone regardless of its
-// exact cause. It also scales with device count (one ioctl each, no xinput
-// subprocess storm) and is vendor-agnostic (no name matching).
-//
-// Fallback: if any device cannot be grabbed (e.g. already grabbed by another
-// process), layer xinput disable on top so no local input leaks into X. The
-// common case grabs everything and never touches xinput. Our own uinput virtual
-// devices are skipped — grabbing them is pointless and a spurious failure there
-// would needlessly trip the xinput fallback (and reintroduce the freeze).
-func (c *Capturer) isolateInput() {
-	c.mu.Lock()
-	files := make([]*os.File, len(c.deviceFiles))
-	copy(files, c.deviceFiles)
-	c.mu.Unlock()
-
-	var grabbed []*os.File
-	failures := 0
-	for _, f := range files {
-		if strings.Contains(strings.ToLower(evdevName(f)), "mwb") {
-			continue // never grab our own virtual uinput devices
-		}
-		if err := evdevGrab(f, true); err != nil {
-			failures++
-			continue
-		}
-		grabbed = append(grabbed, f)
-	}
-
-	// Use xinput as a safety net when grabs were incomplete (or impossible).
-	fallback := failures > 0 || len(grabbed) == 0
-
-	c.mu.Lock()
-	c.grabbedFiles = grabbed
-	c.xinputFallback = fallback
-	c.mu.Unlock()
-
-	if fallback {
-		c.disableXinput()
-	}
-	slog.Info("input isolated", "grabbed", len(grabbed), "grab_failures", failures, "xinput_fallback", fallback)
-}
-
-// releaseInput reverses isolateInput: ungrab every device we grabbed and, only
-// if the xinput fallback ran, re-enable those devices. Safe (no-op) when nothing
-// is isolated, so SetActive and Stop can call it unconditionally.
-func (c *Capturer) releaseInput() {
-	c.mu.Lock()
-	grabbed := c.grabbedFiles
-	c.grabbedFiles = nil
-	fallback := c.xinputFallback
-	c.xinputFallback = false
-	c.mu.Unlock()
-
-	for _, f := range grabbed {
-		_ = evdevGrab(f, false) // best effort; fd close also releases the grab
-	}
-	if fallback {
-		c.enableXinput()
-	}
-	if len(grabbed) > 0 || fallback {
-		slog.Info("input released", "ungrabbed", len(grabbed), "xinput_fallback", fallback)
-	}
-}
-
 // disableXinput disables Razer/Wooting devices and caches which IDs were disabled
 // so enableXinput re-enables the exact same set (avoids TOCTOU if devices change).
 func (c *Capturer) disableXinput() {
@@ -837,7 +731,9 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
 		c.canSwitch = false // block re-trigger until cursor moves away from edge
-		// Compute the off-edge entry point while still holding the lock.
+		c.mu.Unlock()
+
+		// Move cursor away from edge SYNCHRONOUSLY before enabling xinput
 		var entryX int32
 		if c.edgeSide == "left" {
 			entryX = 100
@@ -845,25 +741,15 @@ func (c *Capturer) handleRel(ev inputEvent) {
 			entryX = c.screen.Width - 100
 		}
 		entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
-		c.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
+			fmt.Sprintf("%d", entryX),
+			fmt.Sprintf("%d", entryY))
+		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
+		_ = cmd.Run()
+		cancel()
 
-		// Release isolation FIRST so the local mouse is live the instant control
-		// returns. Holding the EVIOCGRAB across the cursor warp (xdotool can take
-		// hundreds of ms) froze the mouse on return. canSwitch is already false,
-		// so the brief window before the warp lands cannot re-trigger a switch.
-		c.releaseInput()
-
-		// Warp the cursor off the edge asynchronously — a slow xdotool must never
-		// block the evdev read loop (mirrors the OnActivated/OnReclaimed paths).
-		go func(x, y int32) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-				fmt.Sprintf("%d", x), fmt.Sprintf("%d", y))
-			cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-			_ = cmd.Run()
-		}(entryX, entryY)
-
+		c.enableXinput()
 		c.mu.Lock()
 		return
 	}
