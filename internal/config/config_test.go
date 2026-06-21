@@ -57,6 +57,9 @@ key = "SomeKeyHere!1234"
 	if cfg.Name == "" {
 		t.Error("name should default to hostname")
 	}
+	if cfg.InboundMultiplier != 1.0 {
+		t.Errorf("default inbound_multiplier = %v, want 1.0", cfg.InboundMultiplier)
+	}
 }
 
 func TestClipboardEnabledDefault(t *testing.T) {

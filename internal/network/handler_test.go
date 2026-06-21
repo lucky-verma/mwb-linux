@@ -65,6 +65,48 @@ func TestHandleMouseMove(t *testing.T) {
 	}
 }
 
+func sendMove(h *Handler, x, y int32) {
+	p := &protocol.Packet{Type: protocol.Mouse}
+	p.Mouse.X, p.Mouse.Y, p.Mouse.DwFlags = x, y, protocol.WM_MOUSEMOVE
+	h.HandlePacket(p)
+}
+
+func TestInboundMultiplier_DefaultMirrors(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock} // unset -> treated as 1.0
+	sendMove(h, 5000, 5000)
+	sendMove(h, 5300, 5200)
+	last := mock.MouseMoves[len(mock.MouseMoves)-1]
+	if last.X != 5300 || last.Y != 5200 {
+		t.Errorf("default move = (%d,%d), want (5300,5200) 1:1 mirror", last.X, last.Y)
+	}
+}
+
+func TestInboundMultiplier_ScalesDeltas(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock, InboundMultiplier: 2.0}
+	sendMove(h, 10000, 10000) // seeds (snap to position)
+	sendMove(h, 10100, 10080) // delta (100,80) * 2 -> (200,160) => (10200,10160)
+	if mock.MouseMoves[0].X != 10000 || mock.MouseMoves[0].Y != 10000 {
+		t.Errorf("seed move = (%d,%d), want (10000,10000)", mock.MouseMoves[0].X, mock.MouseMoves[0].Y)
+	}
+	last := mock.MouseMoves[len(mock.MouseMoves)-1]
+	if last.X != 10200 || last.Y != 10160 {
+		t.Errorf("scaled move = (%d,%d), want (10200,10160)", last.X, last.Y)
+	}
+}
+
+func TestInboundMultiplier_JumpSnaps(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock, InboundMultiplier: 3.0}
+	sendMove(h, 10000, 10000)
+	sendMove(h, 60000, 60000) // delta > threshold => snap, not scaled
+	last := mock.MouseMoves[len(mock.MouseMoves)-1]
+	if last.X != 60000 || last.Y != 60000 {
+		t.Errorf("jump move = (%d,%d), want (60000,60000) snapped", last.X, last.Y)
+	}
+}
+
 func TestHandleMouseButtons(t *testing.T) {
 	mock := &MockInputDevice{}
 	h := &Handler{Mouse: mock, Keyboard: mock}

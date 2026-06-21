@@ -87,8 +87,9 @@ func main() {
 	slog.Info("virtual input devices created")
 
 	handler := &network.Handler{
-		Mouse:    mouse,
-		Keyboard: keyboard,
+		Mouse:             mouse,
+		Keyboard:          keyboard,
+		InboundMultiplier: cfg.InboundMultiplier,
 	}
 
 	sigCh := make(chan os.Signal, 1)
