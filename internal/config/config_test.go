@@ -57,6 +57,28 @@ key = "SomeKeyHere!1234"
 	if cfg.Name == "" {
 		t.Error("name should default to hostname")
 	}
+	if cfg.AccelMultiplier != 2.0 {
+		t.Errorf("default accel_multiplier = %v, want 2.0", cfg.AccelMultiplier)
+	}
+}
+
+func TestAccelMultiplierExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+accel_multiplier = 0.5
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AccelMultiplier != 0.5 {
+		t.Errorf("accel_multiplier = %v, want 0.5", cfg.AccelMultiplier)
+	}
 }
 
 func TestClipboardEnabledDefault(t *testing.T) {

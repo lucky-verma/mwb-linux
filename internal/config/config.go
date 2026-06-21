@@ -17,6 +17,11 @@ type Config struct {
 	RemoteHeight int    `toml:"remote_height"`
 	Edge         string `toml:"edge"`
 	Clipboard    *bool  `toml:"clipboard"` // nil = unset, treated as enabled
+
+	// AccelMultiplier scales raw evdev deltas before they move the remote
+	// cursor. The Windows side applies no acceleration of its own (absolute
+	// positioning), so this is the only cursor-speed knob. <= 0 means unset.
+	AccelMultiplier float64 `toml:"accel_multiplier"`
 }
 
 func Load(path string) (*Config, error) {
@@ -48,6 +53,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.RemoteHeight == 0 {
 		cfg.RemoteHeight = 1080
+	}
+	if cfg.AccelMultiplier <= 0 {
+		cfg.AccelMultiplier = 2.0
 	}
 	if cfg.Edge == "" {
 		cfg.Edge = "left"

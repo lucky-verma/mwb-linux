@@ -51,11 +51,19 @@ func TestParseXinputIDs_AttachedDevicesIncluded(t *testing.T) {
 		t.Errorf("expected 2 Wooting device IDs, got %d: %v", len(ids), ids)
 	}
 	has := func(want int) bool {
-		for _, id := range ids { if id == want { return true } }
+		for _, id := range ids {
+			if id == want {
+				return true
+			}
+		}
 		return false
 	}
-	if !has(10) { t.Error("expected id=10 (Wooting Mouse)") }
-	if !has(8)  { t.Error("expected id=8 (Wooting keyboard)") }
+	if !has(10) {
+		t.Error("expected id=10 (Wooting Mouse)")
+	}
+	if !has(8) {
+		t.Error("expected id=8 (Wooting keyboard)")
+	}
 }
 
 func TestParseXinputIDs_EmptyOutput(t *testing.T) {
@@ -79,32 +87,46 @@ func TestParseXinputIDs_NoRazerWooting(t *testing.T) {
 // --- applyAcceleration ---
 
 func TestApplyAcceleration_ZeroDelta(t *testing.T) {
-	if got := applyAcceleration(0); got != 0 {
+	if got := applyAcceleration(0, defaultAccelMultiplier); got != 0 {
 		t.Errorf("applyAcceleration(0) = %d, want 0", got)
 	}
 }
 
 func TestApplyAcceleration_SmallPositive(t *testing.T) {
 	// Values < 1 after scaling should be clamped to 1
-	if got := applyAcceleration(1); got < 1 {
+	if got := applyAcceleration(1, defaultAccelMultiplier); got < 1 {
 		t.Errorf("applyAcceleration(1) = %d, should be >= 1", got)
 	}
 }
 
 func TestApplyAcceleration_SmallNegative(t *testing.T) {
-	if got := applyAcceleration(-1); got > -1 {
+	if got := applyAcceleration(-1, defaultAccelMultiplier); got > -1 {
 		t.Errorf("applyAcceleration(-1) = %d, should be <= -1", got)
 	}
 }
 
 func TestApplyAcceleration_Symmetry(t *testing.T) {
 	for _, delta := range []int32{1, 5, 10, 100} {
-		pos := applyAcceleration(delta)
-		neg := applyAcceleration(-delta)
+		pos := applyAcceleration(delta, defaultAccelMultiplier)
+		neg := applyAcceleration(-delta, defaultAccelMultiplier)
 		if pos != -neg {
 			t.Errorf("acceleration not symmetric: applyAcceleration(%d)=%d, applyAcceleration(%d)=%d",
 				delta, pos, -delta, neg)
 		}
+	}
+}
+
+func TestApplyAcceleration_Multiplier(t *testing.T) {
+	// Multiplier scales linearly above the sub-pixel clamp.
+	if got := applyAcceleration(10, 1.0); got != 10 {
+		t.Errorf("applyAcceleration(10, 1.0) = %d, want 10", got)
+	}
+	if got := applyAcceleration(10, 3.0); got != 30 {
+		t.Errorf("applyAcceleration(10, 3.0) = %d, want 30", got)
+	}
+	// A fractional multiplier still moves at least 1px for a unit delta.
+	if got := applyAcceleration(1, 0.5); got != 1 {
+		t.Errorf("applyAcceleration(1, 0.5) = %d, want 1 (sub-pixel clamp)", got)
 	}
 }
 
@@ -192,10 +214,10 @@ func TestSetActive_ResetsGatesOnActivate(t *testing.T) {
 
 func TestSetActive_NoOpWhenAlreadyActive(t *testing.T) {
 	c := &Capturer{
-		active:   true,
-		stopCh:   make(chan struct{}),
-		remoteW:  1920,
-		remoteH:  1080,
+		active:  true,
+		stopCh:  make(chan struct{}),
+		remoteW: 1920,
+		remoteH: 1080,
 	}
 	// Should not deadlock, should not panic
 	done := make(chan struct{})

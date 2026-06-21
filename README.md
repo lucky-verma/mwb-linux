@@ -171,6 +171,7 @@ For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 | `remote_height` | 1080 | Remote screen height in pixels |
 | `edge` | left | Screen edge for switching: `left` or `right` |
 | `clipboard` | true | Clipboard sync: set `false` to disable text/image sharing |
+| `accel_multiplier` | 2.0 | Cursor speed when controlling Windows. Lower it (e.g. `1.0`, `0.5`) if the Windows cursor feels too fast |
 
 ### CLI Flags
 
@@ -238,7 +239,7 @@ scripts/
 - **Middle mouse button auto-scroll** — Middle-click auto-scroll (scroll lock mode) does not work in browsers; normal middle-click works
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
 - **Bidirectional mode requires X11** — Edge detection and device isolation use `xdotool`/`xinput`. Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
-- **Virtual cursor drift** — Remote cursor tracking uses a fixed 2× acceleration; may drift from actual position over extended use. Set `accel_multiplier` in config if needed
+- **Cursor speed / drift** — Remote cursor movement scales raw evdev deltas by `accel_multiplier` (default 2×); lower it if the Windows cursor feels too fast (the Windows side adds no acceleration of its own). Tracking is open-loop, so the virtual cursor may still drift from the actual position over long sessions.
 
 ## Contributing
 
