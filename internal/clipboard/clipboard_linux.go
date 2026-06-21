@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	dataSize      = 48           // bytes of clipboard data per 64-byte packet
+	dataSize      = 48 // bytes of clipboard data per 64-byte packet
 	pollInterval  = 1 * time.Second
 	execTimeout   = 5 * time.Second // max time for any xclip/xsel call
 	textTypeSep   = "{4CFF57F7-BEDD-43d5-AE8F-27A61E886F2F}"
-	maxInlineSize = 1048576      // 1 MB — max for inline TCP send
+	maxInlineSize = 1048576     // 1 MB — max for inline TCP send
 	maxRecvBuf    = 2 * 1048576 // 2 MB — max in-flight clipboard receive buffer
 )
 
@@ -41,7 +41,7 @@ type Manager struct {
 	recvBuf     bytes.Buffer // accumulates incoming clipboard chunks
 	receiving   bool
 	recvIsImage bool
-	justSet     time.Time  // when we last set clipboard from remote — suppress re-send
+	justSet     time.Time // when we last set clipboard from remote — suppress re-send
 	stopCh      chan struct{}
 	wg          sync.WaitGroup // tracks pollClipboard goroutine for clean shutdown
 }
