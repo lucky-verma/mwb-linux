@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/lucky-verma/mwb-linux/internal/input"
 	"github.com/lucky-verma/mwb-linux/internal/network"
@@ -546,17 +547,38 @@ func evdevGrab(f *os.File, grab bool) error {
 	return nil
 }
 
+// eviocgname is EVIOCGNAME(256) = _IOC(_IOC_READ, 'E', 0x06, 256): read the
+// device name. Used to recognise (and skip) our own uinput virtual devices.
+const eviocgname = 0x81004506
+
+// evdevName returns the device name, or "" if it cannot be read.
+func evdevName(f *os.File) string {
+	var buf [256]byte
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgname), uintptr(unsafe.Pointer(&buf[0]))); errno != 0 {
+		return ""
+	}
+	n := 0
+	for n < len(buf) && buf[n] != 0 {
+		n++
+	}
+	return string(buf[:n])
+}
+
 // isolateInput stops local input from reaching X while controlling the remote.
 //
-// Primary path: EVIOCGRAB the evdev fds we already hold. A grab is invisible to
-// X — it produces no XInput device-hierarchy changes — so the compositor never
-// reconfigures and the screen no longer stalls for ~2s on return. This also
-// scales with peripheral count (one ioctl each, no xinput subprocess storm) and
-// is vendor-agnostic (no Razer/Wooting name matching).
+// Primary path: EVIOCGRAB the evdev fds we already hold. A grab produces no
+// XInput device add/remove events, unlike re-enabling N xinput devices on
+// return. With many peripherals (e.g. ~19 Razer/Wooting sub-devices) that
+// re-enable burst empirically froze the compositor for ~2s on return; grabbing
+// never touches the X device hierarchy, so the stall is gone regardless of its
+// exact cause. It also scales with device count (one ioctl each, no xinput
+// subprocess storm) and is vendor-agnostic (no name matching).
 //
 // Fallback: if any device cannot be grabbed (e.g. already grabbed by another
-// process, or an unexpected fd), layer xinput disable on top so no local input
-// leaks into X. The common case grabs everything and never touches xinput.
+// process), layer xinput disable on top so no local input leaks into X. The
+// common case grabs everything and never touches xinput. Our own uinput virtual
+// devices are skipped — grabbing them is pointless and a spurious failure there
+// would needlessly trip the xinput fallback (and reintroduce the freeze).
 func (c *Capturer) isolateInput() {
 	c.mu.Lock()
 	files := make([]*os.File, len(c.deviceFiles))
@@ -566,6 +588,9 @@ func (c *Capturer) isolateInput() {
 	var grabbed []*os.File
 	failures := 0
 	for _, f := range files {
+		if strings.Contains(strings.ToLower(evdevName(f)), "mwb") {
+			continue // never grab our own virtual uinput devices
+		}
 		if err := evdevGrab(f, true); err != nil {
 			failures++
 			continue
