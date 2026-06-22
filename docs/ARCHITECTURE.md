@@ -212,7 +212,7 @@ internal/
 ```toml
 # ~/.config/mwb/config.toml
 host = "192.168.1.100"        # Windows machine IP
-key = "vE8_hB2;dN9>rK9<"     # Must match PowerToys MWB security key
+key = "YourSecurityKey"       # Must match PowerToys MWB security key
 name = "linux"                 # Machine name (max 15 chars)
 port = 15100                   # Base port (message port = 15101)
 ```

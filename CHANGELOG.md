@@ -9,10 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.4.1] - 2026-06-21
 
 ### Added
-- Debian packaging metadata, man page, example config, superficial autopkgtest,
+- Debian packaging metadata, man page, example config, basic CLI autopkgtest,
   and Debian readiness documentation.
 - Public PR checklist items for keeping package metadata and release text free
-  of private workstation details.
+  of unintended local metadata.
 
 ### Changed
 - Lowered the Go module baseline to Go 1.22 and dependency versions available
@@ -23,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.4.0] - 2026-06-21
 
 ### Fixed
-- **Woobly cursor on Wayland (#5)**: two-part fix.
+- **Wobbly cursor on Wayland (#5)**: two-part fix.
   1. Virtual mouse now declares `INPUT_PROP_POINTER` via `UI_SET_PROPBIT`
      so libinput stops misclassifying the device. Regression test in
      `uinput_test.go` reads `/sys/class/input/inputN/properties` to verify
