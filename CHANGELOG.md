@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Inbound keyboard layout profiles via `keyboard_layout` in `config.toml`.
+  `auto` detects the local Linux layout when possible; supported profiles cover
+  common US, German, French, Belgian, Spanish/Latin American, Italian, UK,
+  Portuguese, Nordic, Swiss, and Dutch layouts. This fixes layout-sensitive
+  Windows-to-Linux key forwarding such as German `z/y`, `ß`, and umlaut keys.
+
 ## [0.4.1] - 2026-06-21
 
 ### Added
