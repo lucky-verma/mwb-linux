@@ -42,6 +42,8 @@ type Handler struct {
 	// Windows 1:1 (the default). Inbound is absolute, so this applies a constant
 	// gain to per-packet deltas rather than a true acceleration curve.
 	InboundMultiplier float64
+	// KeyboardLayout selects the inbound Windows VK -> Linux evdev mapping.
+	KeyboardLayout string
 	// inbound cursor tracking (single-goroutine receive loop, no lock needed)
 	inX, inY         int32 // current injected absolute position (0-65535)
 	lastInX, lastInY int32 // last absolute position reported by the remote
@@ -205,9 +207,9 @@ func clamp65535(v int32) int32 {
 
 func (h *Handler) handleKeyboard(pkt *protocol.Packet) {
 	kd := pkt.Keyboard
-	keyCode, ok := input.VKToKeyCode(kd.WVk)
+	keyCode, ok := input.VKToKeyCodeForLayout(kd.WVk, h.KeyboardLayout)
 	if !ok {
-		slog.Debug("unknown VK code", "vk", kd.WVk)
+		slog.Debug("unknown VK code", "vk", kd.WVk, "keyboardLayout", h.KeyboardLayout)
 		return
 	}
 	var err error

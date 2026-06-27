@@ -59,9 +59,10 @@ func main() {
 	// Clipboard runs by default. Either config (clipboard = false) or the
 	// --no-clipboard flag disables it; the flag wins over config.
 	clipboardEnabled := cfg.ClipboardEnabled() && !*noClipboard
+	keyboardLayout := input.ResolveKeyboardLayout(cfg.KeyboardLayout)
 
 	slog.Debug("debug logging enabled")
-	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional, "edge", *edgeSide, "clipboard", clipboardEnabled)
+	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional, "edge", *edgeSide, "clipboard", clipboardEnabled, "keyboard_layout", keyboardLayout)
 
 	mouse, err := input.CreateVirtualMouse("mwb-mouse")
 	if err != nil {
@@ -90,6 +91,7 @@ func main() {
 		Mouse:             mouse,
 		Keyboard:          keyboard,
 		InboundMultiplier: cfg.InboundMultiplier,
+		KeyboardLayout:    keyboardLayout,
 	}
 
 	sigCh := make(chan os.Signal, 1)

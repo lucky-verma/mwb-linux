@@ -18,6 +18,11 @@ type Config struct {
 	Edge         string `toml:"edge"`
 	Clipboard    *bool  `toml:"clipboard"` // nil = unset, treated as enabled
 
+	// KeyboardLayout controls inbound Windows->Linux keyboard mapping. "auto"
+	// detects the local Linux layout when possible; unsupported layouts fall back
+	// to the US-compatible mapping.
+	KeyboardLayout string `toml:"keyboard_layout"`
+
 	// AccelMultiplier scales raw evdev deltas before they move the remote cursor
 	// (outbound, Linux->Windows). The Windows side adds no acceleration of its
 	// own, so this is the only outbound speed knob. <= 0 means unset.
@@ -64,6 +69,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.InboundMultiplier <= 0 {
 		cfg.InboundMultiplier = 1.0
+	}
+	if cfg.KeyboardLayout == "" {
+		cfg.KeyboardLayout = "auto"
 	}
 	if cfg.Edge == "" {
 		cfg.Edge = "left"

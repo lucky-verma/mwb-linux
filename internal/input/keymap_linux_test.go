@@ -56,3 +56,104 @@ func TestVKToKeyCode(t *testing.T) {
 		})
 	}
 }
+
+func TestVKToKeyCodeForGermanLayout(t *testing.T) {
+	tests := []struct {
+		name string
+		vk   int32
+		want uint16
+	}{
+		{"VK_Z", 0x5A, KEY_Y},
+		{"VK_Y", 0x59, KEY_Z},
+		{"VK_OEM_4_ssharp", 0xDB, KEY_MINUS},
+		{"VK_OEM_1_udiaeresis", 0xBA, KEY_LEFTBRACE},
+		{"VK_OEM_3_odiaeresis", 0xC0, KEY_SEMICOLON},
+		{"VK_OEM_7_adiaeresis", 0xDE, KEY_APOSTROPHE},
+		{"VK_OEM_PLUS", 0xBB, KEY_RIGHTBRACE},
+		{"VK_OEM_6_dead_acute", 0xDD, KEY_EQUAL},
+		{"VK_OEM_5_dead_circumflex", 0xDC, KEY_GRAVE},
+		{"VK_OEM_2_numbersign", 0xBF, KEY_BACKSLASH},
+		{"VK_OEM_MINUS", 0xBD, KEY_SLASH},
+		{"VK_OEM_102", 0xE2, KEY_102ND},
+		{"VK_2_stays_physical", 0x32, KEY_2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := VKToKeyCodeForLayout(tt.vk, "de")
+			if !ok || got != tt.want {
+				t.Errorf("VKToKeyCodeForLayout(0x%X, de) = %d, %v; want %d, true", tt.vk, got, ok, tt.want)
+			}
+		})
+	}
+}
+
+func TestVKToKeyCodeForUnknownLayoutFallsBack(t *testing.T) {
+	got, ok := VKToKeyCodeForLayout(0x5A, "unsupported")
+	if !ok || got != KEY_Z {
+		t.Errorf("VKToKeyCodeForLayout(0x5A, unsupported) = %d, %v; want %d, true", got, ok, KEY_Z)
+	}
+}
+
+func TestVKToKeyCodeForCommonLayoutProfiles(t *testing.T) {
+	tests := []struct {
+		layout string
+		vk     int32
+		want   uint16
+	}{
+		{"fr", vkA, KEY_Q},
+		{"fr", vkQ, KEY_A},
+		{"fr", vkM, KEY_SEMICOLON},
+		{"fr", vkOEMComma, KEY_M},
+		{"be", vkOEMPlus, KEY_SLASH},
+		{"es", vkOEM1, KEY_LEFTBRACE},
+		{"es", vkOEMPlus, KEY_RIGHTBRACE},
+		{"it", vkOEM4, KEY_MINUS},
+		{"gb", vkOEM7, KEY_BACKSLASH},
+		{"gb", vkOEM5, KEY_102ND},
+		{"pt", vkOEMPlus, KEY_LEFTBRACE},
+		{"nordic", vkOEMPlus, KEY_MINUS},
+		{"nordic", vkOEM4, KEY_EQUAL},
+		{"ch", vkZ, KEY_Y},
+		{"ch", vkOEM8, KEY_BACKSLASH},
+		{"nl", vkOEMPlus, KEY_SEMICOLON},
+	}
+	for _, tt := range tests {
+		t.Run(tt.layout, func(t *testing.T) {
+			got, ok := VKToKeyCodeForLayout(tt.vk, tt.layout)
+			if !ok || got != tt.want {
+				t.Errorf("VKToKeyCodeForLayout(0x%X, %s) = %d, %v; want %d, true", tt.vk, tt.layout, got, ok, tt.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalKeyboardLayout(t *testing.T) {
+	tests := map[string]string{
+		"":               "",
+		"auto":           "auto",
+		"de":             "de",
+		"de_DE":          "de",
+		"de,us":          "de",
+		"German":         "de",
+		"fr-FR":          "fr",
+		"Belgian":        "be",
+		"Spanish":        "es",
+		"Latin-American": "es",
+		"it-IT":          "it",
+		"en-GB":          "gb",
+		"Portuguese":     "pt",
+		"Norwegian":      "nordic",
+		"Danish":         "nordic",
+		"Swedish":        "nordic",
+		"Finnish":        "nordic",
+		"Swiss-German":   "ch",
+		"Dutch":          "nl",
+		"en-US":          "us",
+		"us":             "us",
+	}
+	for input, want := range tests {
+		if got := CanonicalKeyboardLayout(input); got != want {
+			t.Errorf("CanonicalKeyboardLayout(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

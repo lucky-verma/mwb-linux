@@ -112,7 +112,30 @@ const (
 	KEY_LEFTMETA   uint16 = 125
 	KEY_RIGHTMETA  uint16 = 126
 	KEY_COMPOSE    uint16 = 127
+	KEY_102ND      uint16 = 86
 	KEY_MAX        uint16 = 0x2ff
+)
+
+const (
+	vkA        int32 = 0x41
+	vkM        int32 = 0x4D
+	vkQ        int32 = 0x51
+	vkW        int32 = 0x57
+	vkY        int32 = 0x59
+	vkZ        int32 = 0x5A
+	vkOEM1     int32 = 0xBA
+	vkOEMPlus  int32 = 0xBB
+	vkOEMComma int32 = 0xBC
+	vkOEMMinus int32 = 0xBD
+	vkOEMDot   int32 = 0xBE
+	vkOEM2     int32 = 0xBF
+	vkOEM3     int32 = 0xC0
+	vkOEM4     int32 = 0xDB
+	vkOEM5     int32 = 0xDC
+	vkOEM6     int32 = 0xDD
+	vkOEM7     int32 = 0xDE
+	vkOEM8     int32 = 0xDF
+	vkOEM102   int32 = 0xE2
 )
 
 // vkMap maps Windows VK codes to Linux evdev KEY_ codes.
@@ -136,10 +159,93 @@ var vkMap = map[int32]uint16{
 	0xA2: KEY_LEFTCTRL, 0xA3: KEY_RIGHTCTRL,
 	0xA4: KEY_LEFTALT, 0xA5: KEY_RIGHTALT,
 	0xAD: KEY_MUTE, 0xAE: KEY_VOLUMEDOWN, 0xAF: KEY_VOLUMEUP,
-	0xBA: KEY_SEMICOLON, 0xBB: KEY_EQUAL, 0xBC: KEY_COMMA,
-	0xBD: KEY_MINUS, 0xBE: KEY_DOT, 0xBF: KEY_SLASH,
-	0xC0: KEY_GRAVE, 0xDB: KEY_LEFTBRACE, 0xDC: KEY_BACKSLASH,
-	0xDD: KEY_RIGHTBRACE, 0xDE: KEY_APOSTROPHE,
+	vkOEM1: KEY_SEMICOLON, vkOEMPlus: KEY_EQUAL, vkOEMComma: KEY_COMMA,
+	vkOEMMinus: KEY_MINUS, vkOEMDot: KEY_DOT, vkOEM2: KEY_SLASH,
+	vkOEM3: KEY_GRAVE, vkOEM4: KEY_LEFTBRACE, vkOEM5: KEY_BACKSLASH,
+	vkOEM6: KEY_RIGHTBRACE, vkOEM7: KEY_APOSTROPHE,
+	vkOEM102: KEY_102ND, // common on ISO keyboards (< > |)
+}
+
+var layoutVKOverrides = map[string]map[int32]uint16{
+	"de": profile(
+		key(vkY, KEY_Z), key(vkZ, KEY_Y),
+		key(vkOEM1, KEY_LEFTBRACE), key(vkOEMPlus, KEY_RIGHTBRACE), key(vkOEMMinus, KEY_SLASH),
+		key(vkOEM3, KEY_SEMICOLON), key(vkOEM4, KEY_MINUS), key(vkOEM5, KEY_GRAVE),
+		key(vkOEM6, KEY_EQUAL), key(vkOEM7, KEY_APOSTROPHE), key(vkOEM2, KEY_BACKSLASH),
+		key(vkOEM102, KEY_102ND),
+	),
+	"fr": profile(
+		key(vkA, KEY_Q), key(vkQ, KEY_A), key(vkZ, KEY_W), key(vkW, KEY_Z), key(vkM, KEY_SEMICOLON),
+		key(vkOEM7, KEY_GRAVE), key(vkOEM4, KEY_MINUS), key(vkOEMPlus, KEY_EQUAL),
+		key(vkOEM6, KEY_LEFTBRACE), key(vkOEM1, KEY_RIGHTBRACE), key(vkOEM3, KEY_APOSTROPHE),
+		key(vkOEM5, KEY_BACKSLASH), key(vkOEMComma, KEY_M), key(vkOEMDot, KEY_COMMA),
+		key(vkOEM2, KEY_DOT), key(vkOEM8, KEY_SLASH), key(vkOEM102, KEY_102ND),
+	),
+	"be": profile(
+		key(vkA, KEY_Q), key(vkQ, KEY_A), key(vkZ, KEY_W), key(vkW, KEY_Z), key(vkM, KEY_SEMICOLON),
+		key(vkOEM7, KEY_GRAVE), key(vkOEM4, KEY_MINUS), key(vkOEMMinus, KEY_EQUAL),
+		key(vkOEM6, KEY_LEFTBRACE), key(vkOEM1, KEY_RIGHTBRACE), key(vkOEM3, KEY_APOSTROPHE),
+		key(vkOEM5, KEY_BACKSLASH), key(vkOEMDot, KEY_COMMA), key(vkOEM2, KEY_DOT),
+		key(vkOEMPlus, KEY_SLASH), key(vkOEMComma, KEY_M), key(vkOEM102, KEY_102ND),
+	),
+	"es": profile(
+		key(vkOEM5, KEY_GRAVE), key(vkOEM4, KEY_MINUS), key(vkOEM6, KEY_EQUAL),
+		key(vkOEM1, KEY_LEFTBRACE), key(vkOEMPlus, KEY_RIGHTBRACE),
+		key(vkOEM3, KEY_SEMICOLON), key(vkOEM7, KEY_APOSTROPHE),
+		key(vkOEM2, KEY_BACKSLASH), key(vkOEM102, KEY_102ND),
+	),
+	"it": profile(
+		key(vkOEM5, KEY_GRAVE), key(vkOEM4, KEY_MINUS), key(vkOEM6, KEY_EQUAL),
+		key(vkOEM1, KEY_LEFTBRACE), key(vkOEMPlus, KEY_RIGHTBRACE),
+		key(vkOEM3, KEY_SEMICOLON), key(vkOEM7, KEY_APOSTROPHE),
+		key(vkOEM2, KEY_BACKSLASH), key(vkOEM102, KEY_102ND),
+	),
+	"gb": profile(
+		key(vkOEM8, KEY_GRAVE), key(vkOEM3, KEY_APOSTROPHE), key(vkOEM7, KEY_BACKSLASH),
+		key(vkOEM5, KEY_102ND), key(vkOEM102, KEY_102ND),
+	),
+	"pt": profile(
+		key(vkOEM5, KEY_GRAVE), key(vkOEM4, KEY_MINUS), key(vkOEM6, KEY_EQUAL),
+		key(vkOEMPlus, KEY_LEFTBRACE), key(vkOEM1, KEY_RIGHTBRACE),
+		key(vkOEM3, KEY_SEMICOLON), key(vkOEM7, KEY_APOSTROPHE),
+		key(vkOEM2, KEY_BACKSLASH), key(vkOEM102, KEY_102ND),
+	),
+	"nordic": profile(
+		key(vkOEM5, KEY_GRAVE), key(vkOEMPlus, KEY_MINUS), key(vkOEM4, KEY_EQUAL),
+		key(vkOEM6, KEY_LEFTBRACE), key(vkOEM1, KEY_RIGHTBRACE),
+		key(vkOEM3, KEY_SEMICOLON), key(vkOEM7, KEY_APOSTROPHE),
+		key(vkOEM2, KEY_BACKSLASH), key(vkOEM102, KEY_102ND),
+	),
+	"ch": profile(
+		key(vkY, KEY_Z), key(vkZ, KEY_Y),
+		key(vkOEM2, KEY_GRAVE), key(vkOEM4, KEY_MINUS), key(vkOEM6, KEY_EQUAL),
+		key(vkOEM1, KEY_LEFTBRACE), key(vkOEM3, KEY_RIGHTBRACE),
+		key(vkOEM7, KEY_SEMICOLON), key(vkOEM5, KEY_APOSTROPHE),
+		key(vkOEM8, KEY_BACKSLASH), key(vkOEM102, KEY_102ND),
+	),
+	"nl": profile(
+		key(vkOEM7, KEY_GRAVE), key(vkOEM4, KEY_MINUS), key(vkOEM2, KEY_EQUAL),
+		key(vkOEM6, KEY_LEFTBRACE), key(vkOEM1, KEY_RIGHTBRACE),
+		key(vkOEMPlus, KEY_SEMICOLON), key(vkOEM3, KEY_APOSTROPHE),
+		key(vkOEM5, KEY_BACKSLASH), key(vkOEM102, KEY_102ND),
+	),
+}
+
+type vkKey struct {
+	vk  int32
+	key uint16
+}
+
+func key(vk int32, code uint16) vkKey {
+	return vkKey{vk: vk, key: code}
+}
+
+func profile(pairs ...vkKey) map[int32]uint16 {
+	out := make(map[int32]uint16, len(pairs))
+	for _, pair := range pairs {
+		out[pair.vk] = pair.key
+	}
+	return out
 }
 
 func init() {
@@ -163,6 +269,23 @@ func init() {
 func VKToKeyCode(vk int32) (uint16, bool) {
 	code, ok := vkMap[vk]
 	return code, ok
+}
+
+// VKToKeyCodeForLayout maps a Windows virtual-key code to the Linux evdev key
+// that produces the same logical key on the requested keyboard layout.
+func VKToKeyCodeForLayout(vk int32, layout string) (uint16, bool) {
+	if overrides, ok := normalizedLayoutOverrides(layout); ok {
+		if code, ok := overrides[vk]; ok {
+			return code, true
+		}
+	}
+	return VKToKeyCode(vk)
+}
+
+func normalizedLayoutOverrides(layout string) (map[int32]uint16, bool) {
+	profile := CanonicalKeyboardLayout(layout)
+	overrides, ok := layoutVKOverrides[profile]
+	return overrides, ok
 }
 
 // usedKeyCodes returns a deduplicated sorted list of all Linux evdev key codes

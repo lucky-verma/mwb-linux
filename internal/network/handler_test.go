@@ -152,6 +152,19 @@ func TestHandleKeyboard(t *testing.T) {
 	}
 }
 
+func TestHandleKeyboardGermanLayout(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock, KeyboardLayout: "de"}
+
+	pkt := &protocol.Packet{Type: protocol.Keyboard}
+	pkt.Keyboard.WVk = 0x5A // VK_Z; German layout should inject the physical Y key.
+
+	h.HandlePacket(pkt)
+	if len(mock.KeyDowns) != 1 || mock.KeyDowns[0] != input.KEY_Y {
+		t.Errorf("expected KEY_Y down for German VK_Z, got %v", mock.KeyDowns)
+	}
+}
+
 func TestHandleMouseWheel(t *testing.T) {
 	mock := &MockInputDevice{}
 	h := &Handler{Mouse: mock, Keyboard: mock}

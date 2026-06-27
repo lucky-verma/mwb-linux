@@ -133,6 +133,17 @@ Same as above, plus:
 28-31   4     DwFlags (int32) — 0=keydown, 0x80=keyup, 0x01=extended
 ```
 
+Inbound keyboard handling maps `WVk` to Linux evdev key codes through a layout
+profile (`keyboard_layout`). This is required because Windows virtual-key codes
+are layout-sensitive for non-US layouts, while Linux `uinput` injects physical
+evdev key positions that the local XKB layout then resolves to characters.
+Current PowerToys MWB packets do not include the Windows hardware scan code or
+Unicode text, so fully zero-config global layout support requires additional
+sender metadata. Supported receive profiles currently cover common Windows
+Latin/ISO layouts (`us`, `de`, `fr`, `be`, `es`, `it`, `gb`, `pt`, Nordic,
+Swiss, and Dutch); unknown profiles fall back to the original US-compatible
+mapping.
+
 ## Key Packet Types
 
 | Type | Value | Direction | Purpose |
@@ -215,6 +226,7 @@ host = "192.168.1.100"        # Windows machine IP
 key = "YourSecurityKey"       # Must match PowerToys MWB security key
 name = "linux"                 # Machine name (max 15 chars)
 port = 15100                   # Base port (message port = 15101)
+keyboard_layout = "auto"       # Inbound keyboard mapping profile
 ```
 
 ## Running

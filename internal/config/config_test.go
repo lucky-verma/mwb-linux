@@ -63,6 +63,9 @@ key = "SomeKeyHere!1234"
 	if cfg.InboundMultiplier != 1.0 {
 		t.Errorf("default inbound_multiplier = %v, want 1.0", cfg.InboundMultiplier)
 	}
+	if cfg.KeyboardLayout != "auto" {
+		t.Errorf("default keyboard_layout = %q, want auto", cfg.KeyboardLayout)
+	}
 }
 
 func TestAccelMultiplierExplicit(t *testing.T) {
@@ -81,6 +84,25 @@ accel_multiplier = 0.5
 	}
 	if cfg.AccelMultiplier != 0.5 {
 		t.Errorf("accel_multiplier = %v, want 0.5", cfg.AccelMultiplier)
+	}
+}
+
+func TestKeyboardLayoutExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+keyboard_layout = "de"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KeyboardLayout != "de" {
+		t.Errorf("keyboard_layout = %q, want de", cfg.KeyboardLayout)
 	}
 }
 
