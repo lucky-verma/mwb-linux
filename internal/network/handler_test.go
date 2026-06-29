@@ -2,6 +2,7 @@
 package network
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/lucky-verma/mwb-linux/internal/input"
@@ -162,6 +163,95 @@ func TestHandleKeyboardGermanLayout(t *testing.T) {
 	h.HandlePacket(pkt)
 	if len(mock.KeyDowns) != 1 || mock.KeyDowns[0] != input.KEY_Y {
 		t.Errorf("expected KEY_Y down for German VK_Z, got %v", mock.KeyDowns)
+	}
+}
+
+func TestHandleKeyboardGermanAltGrDropsSyntheticCtrl(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock, KeyboardLayout: "de"}
+	sendKey := func(vk, flags int32) {
+		pkt := &protocol.Packet{Type: protocol.Keyboard}
+		pkt.Keyboard.WVk = vk
+		pkt.Keyboard.DwFlags = flags
+		h.HandlePacket(pkt)
+	}
+
+	sendKey(0xA2, 0)                       // Windows AltGr synthetic Ctrl down.
+	sendKey(0xA5, protocol.LLKHF_EXTENDED) // Right Alt down.
+	sendKey(0x51, 0)                       // German AltGr+Q => @.
+	sendKey(0x51, protocol.LLKHF_UP)
+	sendKey(0xA5, protocol.LLKHF_UP)
+	sendKey(0xA2, protocol.LLKHF_UP)
+
+	if want := []uint16{input.KEY_RIGHTALT, input.KEY_Q}; !reflect.DeepEqual(mock.KeyDowns, want) {
+		t.Errorf("KeyDowns = %v, want %v", mock.KeyDowns, want)
+	}
+	if want := []uint16{input.KEY_Q, input.KEY_RIGHTALT}; !reflect.DeepEqual(mock.KeyUps, want) {
+		t.Errorf("KeyUps = %v, want %v", mock.KeyUps, want)
+	}
+}
+
+func TestHandleKeyboardCtrlShortcutStillWorks(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	sendKey := func(vk, flags int32) {
+		pkt := &protocol.Packet{Type: protocol.Keyboard}
+		pkt.Keyboard.WVk = vk
+		pkt.Keyboard.DwFlags = flags
+		h.HandlePacket(pkt)
+	}
+
+	sendKey(0xA2, 0)
+	sendKey(0x41, 0)
+	sendKey(0x41, protocol.LLKHF_UP)
+	sendKey(0xA2, protocol.LLKHF_UP)
+
+	if want := []uint16{input.KEY_LEFTCTRL, input.KEY_A}; !reflect.DeepEqual(mock.KeyDowns, want) {
+		t.Errorf("KeyDowns = %v, want %v", mock.KeyDowns, want)
+	}
+	if want := []uint16{input.KEY_A, input.KEY_LEFTCTRL}; !reflect.DeepEqual(mock.KeyUps, want) {
+		t.Errorf("KeyUps = %v, want %v", mock.KeyUps, want)
+	}
+}
+
+func TestHandleKeyboardPendingCtrlFlushesBeforeMouse(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+
+	ctrl := &protocol.Packet{Type: protocol.Keyboard}
+	ctrl.Keyboard.WVk = 0xA2
+	h.HandlePacket(ctrl)
+
+	mouse := &protocol.Packet{Type: protocol.Mouse}
+	mouse.Mouse.DwFlags = protocol.WM_LBUTTONDOWN
+	h.HandlePacket(mouse)
+
+	if want := []uint16{input.KEY_LEFTCTRL}; !reflect.DeepEqual(mock.KeyDowns, want) {
+		t.Errorf("KeyDowns = %v, want %v", mock.KeyDowns, want)
+	}
+	if len(mock.ButtonDowns) != 1 || mock.ButtonDowns[0] != input.BTN_LEFT {
+		t.Errorf("ButtonDowns = %v, want [%d]", mock.ButtonDowns, input.BTN_LEFT)
+	}
+}
+
+func TestHandleKeyboardPendingCtrlFlushesBeforeKeyUp(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+
+	ctrl := &protocol.Packet{Type: protocol.Keyboard}
+	ctrl.Keyboard.WVk = 0xA2
+	h.HandlePacket(ctrl)
+
+	aUp := &protocol.Packet{Type: protocol.Keyboard}
+	aUp.Keyboard.WVk = 0x41
+	aUp.Keyboard.DwFlags = protocol.LLKHF_UP
+	h.HandlePacket(aUp)
+
+	if want := []uint16{input.KEY_LEFTCTRL}; !reflect.DeepEqual(mock.KeyDowns, want) {
+		t.Errorf("KeyDowns = %v, want %v", mock.KeyDowns, want)
+	}
+	if want := []uint16{input.KEY_A}; !reflect.DeepEqual(mock.KeyUps, want) {
+		t.Errorf("KeyUps = %v, want %v", mock.KeyUps, want)
 	}
 }
 
