@@ -104,10 +104,25 @@ sudo usermod -aG input $USER
 git clone https://github.com/lucky-verma/mwb-linux.git
 cd mwb-linux
 make build
-sudo make install
+make install        # no sudo — installs a per-user service
+systemctl --user enable --now mwb
 ```
 
+`make install` is a per-user install: the binary goes to `~/go/bin/mwb` and the
+service to `~/.config/systemd/user/`. Do **not** run it with `sudo` — that
+installs under `root` and the `--user` service then can't find the binary.
+
+It does not set up system dependencies. If this is a fresh machine, run the
+dependency and permission steps from [From Binary](#from-binary) first
+(`xdotool`/`xinput`/`xclip`, the `uinput` module, the udev rule, and the
+`input` group).
+
 > **Note:** Log out and back in after installation for group changes to take effect.
+>
+> **One installer at a time.** The one-line/`.deb`/binary methods install a
+> system service that runs `/usr/local/bin/mwb`. `make install` installs a
+> per-user service that runs `~/go/bin/mwb`. If you switch methods, stop and
+> disable the old service first so you aren't running a stale binary.
 
 ## Quick Start
 

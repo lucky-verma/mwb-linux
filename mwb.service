@@ -9,7 +9,10 @@ Type=simple
 # Override here only if auto-detection fails for your setup.
 # Environment=DISPLAY=:1
 # Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
-ExecStart=/usr/local/bin/mwb -bidi -edge left
+# %h is the home of the user running this --user unit, matching where
+# `make install` places the binary ($HOME/go/bin/mwb). The system-wide
+# installer (scripts/install.sh) ships its own unit pointing at /usr/local/bin.
+ExecStart=%h/go/bin/mwb -bidi -edge left
 Restart=on-failure
 RestartSec=5
 

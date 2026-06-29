@@ -6,12 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-29
+
 ### Added
 - Inbound keyboard layout profiles via `keyboard_layout` in `config.toml`.
   `auto` detects the local Linux layout when possible; supported profiles cover
   common US, German, French, Belgian, Spanish/Latin American, Italian, UK,
   Portuguese, Nordic, Swiss, and Dutch layouts. This fixes layout-sensitive
-  Windows-to-Linux key forwarding such as German `z/y`, `ß`, and umlaut keys.
+  Windows-to-Linux key forwarding such as German `z/y`, `ß`, and umlaut keys
+  (#23, reported by @5inf; German mapping verified by @hm2dev). The German
+  profile is end-to-end verified; the other profiles are derived from standard
+  layout geometry and covered by unit tests.
+
+### Fixed
+- **`make install` ran a stale binary (#23)**: the per-user systemd unit shipped
+  `ExecStart=/usr/local/bin/mwb`, but `make install` writes the binary to
+  `~/go/bin/mwb`. The service therefore started an old `/usr/local/bin/mwb` (or
+  failed) instead of the freshly built binary, which hid the keyboard-layout fix
+  when run under systemd. The unit now uses `ExecStart=%h/go/bin/mwb`, and the
+  README documents `make install` as a no-sudo per-user install. Found by
+  @hm2dev.
 
 ## [0.4.1] - 2026-06-21
 
