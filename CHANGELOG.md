@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-02
+
+### Changed
+- Updated CI checkout to `actions/checkout@v7`.
+- Updated `github.com/BurntSushi/toml` from 1.3.2 to 1.6.0.
+
 ### Fixed
 - German inbound AltGr chords now drop Windows' synthetic Ctrl event before
   injecting right Alt, fixing level-3 keys such as `@`, `~`, and `|` (#23).
@@ -235,7 +241,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.0...v0.3.1
