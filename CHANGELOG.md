@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- German inbound AltGr chords now drop Windows' synthetic Ctrl event before
+  injecting right Alt, fixing level-3 keys such as `@`, `~`, and `|` (#23).
+- Release `.deb` packages now ship `packaging/mwb.service`, whose
+  `/usr/local/bin/mwb` `ExecStart` matches the packaged binary path.
+- Installed systemd user services now default to receive-only mode (`mwb`)
+  instead of bidirectional mode, preventing surprise Linux → Windows mouse
+  handoff on startup.
+- Installers now remove the legacy root `mwb-linux.service` if present, because
+  it can keep port 15101 bound and force bidirectional mode after an upgrade.
+
 ## [0.5.0] - 2026-06-29
 
 ### Added

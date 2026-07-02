@@ -236,10 +236,10 @@ keyboard_layout = "auto"       # Inbound keyboard mapping profile
 mwb
 
 # Bidirectional (Linux can also control Windows)
-sudo mwb -bidi -edge left
+mwb -bidi -edge left
 
 # With debug logging
-sudo mwb -bidi -edge left -debug
+mwb -bidi -edge left -debug
 ```
 
 ## Requirements
@@ -254,7 +254,9 @@ sudo mwb -bidi -edge left -debug
 - `xdotool` installed (for cursor position polling)
 - `xinput` installed (for device isolation)
 - `xrandr` installed (for screen detection)
-- Run with `sudo` for evdev access, or configure udev rules
+- Configure the udev/input-group access from the installer; avoid `sudo mwb`
+  for normal use because it reads root's config and can miss the user's
+  display/session.
 
 ## Critical Invariants
 

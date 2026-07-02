@@ -43,7 +43,10 @@ type Handler struct {
 	// gain to per-packet deltas rather than a true acceleration curve.
 	InboundMultiplier float64
 	// KeyboardLayout selects the inbound Windows VK -> Linux evdev mapping.
-	KeyboardLayout string
+	KeyboardLayout  string
+	pendingCtrl     bool
+	pendingCtrlCode uint16
+	suppressCtrlUp  bool
 	// inbound cursor tracking (single-goroutine receive loop, no lock needed)
 	inX, inY         int32 // current injected absolute position (0-65535)
 	lastInX, lastInY int32 // last absolute position reported by the remote
@@ -52,6 +55,11 @@ type Handler struct {
 
 // HandlePacket dispatches a packet to the appropriate handler.
 func (h *Handler) HandlePacket(pkt *protocol.Packet) {
+	if pkt.Type != protocol.Keyboard {
+		if err := h.flushPendingCtrl(); err != nil {
+			slog.Error("keyboard input error", "err", err)
+		}
+	}
 	switch pkt.Type {
 	case protocol.Mouse:
 		h.handleMouse(pkt)
@@ -207,13 +215,20 @@ func clamp65535(v int32) int32 {
 
 func (h *Handler) handleKeyboard(pkt *protocol.Packet) {
 	kd := pkt.Keyboard
-	keyCode, ok := input.VKToKeyCodeForLayout(kd.WVk, h.KeyboardLayout)
+	keyCode, ok := h.keyCodeForPacket(kd)
 	if !ok {
 		slog.Debug("unknown VK code", "vk", kd.WVk, "keyboardLayout", h.KeyboardLayout)
 		return
 	}
-	var err error
 	isUp := (kd.DwFlags & protocol.LLKHF_UP) != 0
+	if h.handlePendingCtrl(kd.WVk, kd.DwFlags, keyCode, isUp) {
+		return
+	}
+	if err := h.flushPendingCtrl(); err != nil {
+		slog.Error("keyboard input error", "err", err)
+		return
+	}
+	var err error
 	if isUp {
 		err = h.Keyboard.KeyUp(keyCode)
 	} else {
@@ -222,4 +237,70 @@ func (h *Handler) handleKeyboard(pkt *protocol.Packet) {
 	if err != nil {
 		slog.Error("keyboard input error", "err", err)
 	}
+}
+
+func (h *Handler) flushPendingCtrl() error {
+	if !h.pendingCtrl {
+		return nil
+	}
+	h.pendingCtrl = false
+	return h.Keyboard.KeyDown(h.pendingCtrlCode)
+}
+
+func (h *Handler) keyCodeForPacket(kd protocol.KeyboardData) (uint16, bool) {
+	switch kd.WVk {
+	case 0x10:
+		return input.KEY_LEFTSHIFT, true
+	case 0x11:
+		if kd.DwFlags&protocol.LLKHF_EXTENDED != 0 {
+			return input.KEY_RIGHTCTRL, true
+		}
+		return input.KEY_LEFTCTRL, true
+	case 0x12:
+		if kd.DwFlags&protocol.LLKHF_EXTENDED != 0 {
+			return input.KEY_RIGHTALT, true
+		}
+		return input.KEY_LEFTALT, true
+	default:
+		return input.VKToKeyCodeForLayout(kd.WVk, h.KeyboardLayout)
+	}
+}
+
+func (h *Handler) handlePendingCtrl(vk, flags int32, keyCode uint16, isUp bool) bool {
+	if isCtrlVK(vk) {
+		if isUp {
+			if h.pendingCtrl {
+				h.pendingCtrl = false
+				if err := h.Keyboard.KeyDown(keyCode); err != nil {
+					slog.Error("keyboard input error", "err", err)
+					return true
+				}
+				if err := h.Keyboard.KeyUp(keyCode); err != nil {
+					slog.Error("keyboard input error", "err", err)
+				}
+				return true
+			}
+			if h.suppressCtrlUp {
+				h.suppressCtrlUp = false
+				return true
+			}
+			return false
+		}
+		h.pendingCtrl = true
+		h.pendingCtrlCode = keyCode
+		return true
+	}
+	if !isUp && isRightAltVK(vk, flags) && h.pendingCtrl {
+		h.pendingCtrl = false
+		h.suppressCtrlUp = true
+	}
+	return false
+}
+
+func isCtrlVK(vk int32) bool {
+	return vk == 0x11 || vk == 0xA2 || vk == 0xA3
+}
+
+func isRightAltVK(vk, flags int32) bool {
+	return vk == 0xA5 || (vk == 0x12 && flags&protocol.LLKHF_EXTENDED != 0)
 }

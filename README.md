@@ -112,6 +112,10 @@ systemctl --user enable --now mwb
 service to `~/.config/systemd/user/`. Do **not** run it with `sudo` — that
 installs under `root` and the `--user` service then can't find the binary.
 
+The installed service runs receive-only mode (`mwb`) so it will not
+unexpectedly send the Linux mouse to Windows. Use `mwb -bidi -edge left`
+manually when you explicitly want Linux → Windows control.
+
 It does not set up system dependencies. If this is a fresh machine, run the
 dependency and permission steps from [From Binary](#from-binary) first
 (`xdotool`/`xinput`/`xclip`, the `uinput` module, the udev rule, and the
@@ -149,7 +153,7 @@ EOF
 mwb
 
 # Bidirectional (Linux also controls Windows)
-sudo mwb -bidi -edge left
+mwb -bidi -edge left
 ```
 
 ### 4. Add your Linux machine on Windows
@@ -221,7 +225,17 @@ client then never reads or writes the local clipboard, so it won't override what
 you copied on Windows.
 
 ### Mouse controls both screens simultaneously
-Run with `-bidi` flag and `sudo` for device isolation via xinput.
+Make sure you are running bidirectional mode with `mwb -bidi -edge left` after
+the udev/input-group setup and a fresh login. Avoid `sudo mwb` for normal use:
+it reads root's config and can miss the user's display/session.
+
+If an older root service is still running, stop it before starting the user
+service:
+
+```bash
+sudo systemctl disable --now mwb-linux.service
+systemctl --user restart mwb
+```
 
 ### Connection refused
 - Check Windows firewall allows port 15100-15101

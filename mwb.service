@@ -1,5 +1,5 @@
 [Unit]
-Description=Mouse Without Borders Linux client (bidirectional)
+Description=Mouse Without Borders Linux client
 After=network-online.target graphical.target
 Wants=network-online.target
 
@@ -12,7 +12,7 @@ Type=simple
 # %h is the home of the user running this --user unit, matching where
 # `make install` places the binary ($HOME/go/bin/mwb). The system-wide
 # installer (scripts/install.sh) ships its own unit pointing at /usr/local/bin.
-ExecStart=%h/go/bin/mwb -bidi -edge left
+ExecStart=%h/go/bin/mwb
 Restart=on-failure
 RestartSec=5
 
