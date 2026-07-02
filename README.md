@@ -245,6 +245,12 @@ systemctl --user restart mwb
 ### Cursor bounces back immediately
 Set "Move mouse relatively" to OFF in PowerToys MWB settings.
 
+### Cursor returns from the far edge of the other laptop
+Upgrade to a build with directional `MachineSwitched`/`NextMachine` filtering.
+The Linux client should only accept return requests from the edge configured by
+`-edge`; touching the other laptop's far edge should stop there, not bring
+control back to Ubuntu.
+
 ## Project Structure
 
 ```

@@ -108,6 +108,82 @@ func TestInboundMultiplier_JumpSnaps(t *testing.T) {
 	}
 }
 
+func TestHandleMachineSwitchedActivatesWhenAccepted(t *testing.T) {
+	mock := &MockInputDevice{}
+	activated := false
+	h := &Handler{
+		Mouse:          mock,
+		Keyboard:       mock,
+		OnActivated:    func() { activated = true },
+		ShouldActivate: func() bool { return true },
+	}
+
+	h.HandlePacket(&protocol.Packet{Type: protocol.MachineSwitched})
+	if !activated {
+		t.Fatal("expected accepted MachineSwitched to activate local control")
+	}
+}
+
+func TestHandleMachineSwitchedIgnoresRejectedFarEdge(t *testing.T) {
+	mock := &MockInputDevice{}
+	activated := false
+	h := &Handler{
+		Mouse:          mock,
+		Keyboard:       mock,
+		OnActivated:    func() { activated = true },
+		ShouldActivate: func() bool { return false },
+	}
+
+	h.HandlePacket(&protocol.Packet{Type: protocol.MachineSwitched})
+	if activated {
+		t.Fatal("rejected MachineSwitched should not activate local control")
+	}
+}
+
+func TestHandleNextMachineReclaimsWhenAccepted(t *testing.T) {
+	mock := &MockInputDevice{}
+	reclaimed := false
+	h := &Handler{
+		Mouse:       mock,
+		Keyboard:    mock,
+		OnReclaimed: func() { reclaimed = true },
+		ShouldReclaim: func(requestX, requestY, targetID int32) bool {
+			return requestX == 1200 && requestY == 30000 && targetID == 2
+		},
+	}
+
+	pkt := &protocol.Packet{Type: protocol.NextMachine}
+	pkt.Mouse.X = 1200
+	pkt.Mouse.Y = 30000
+	pkt.Mouse.WheelDelta = 2
+
+	h.HandlePacket(pkt)
+	if !reclaimed {
+		t.Fatal("expected accepted NextMachine to reclaim local control")
+	}
+}
+
+func TestHandleNextMachineIgnoresRejectedFarEdge(t *testing.T) {
+	mock := &MockInputDevice{}
+	reclaimed := false
+	h := &Handler{
+		Mouse:         mock,
+		Keyboard:      mock,
+		OnReclaimed:   func() { reclaimed = true },
+		ShouldReclaim: func(requestX, requestY, targetID int32) bool { return false },
+	}
+
+	pkt := &protocol.Packet{Type: protocol.NextMachine}
+	pkt.Mouse.X = 65000
+	pkt.Mouse.Y = 30000
+	pkt.Mouse.WheelDelta = 2
+
+	h.HandlePacket(pkt)
+	if reclaimed {
+		t.Fatal("rejected NextMachine should not reclaim local control")
+	}
+}
+
 func TestHandleMouseButtons(t *testing.T) {
 	mock := &MockInputDevice{}
 	h := &Handler{Mouse: mock, Keyboard: mock}

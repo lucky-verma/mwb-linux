@@ -157,6 +157,56 @@ func TestSafeEntryPosition_RightEdge(t *testing.T) {
 	}
 }
 
+func TestAcceptsReclaim_LeftEdgeOnlyAcceptsLocalLeftLanding(t *testing.T) {
+	c := &Capturer{edgeSide: "left"}
+	if !c.AcceptsReclaim(1200) {
+		t.Fatal("left-edge setup should accept a NextMachine landing near local left edge")
+	}
+	if c.AcceptsReclaim(65000) {
+		t.Fatal("left-edge setup must reject far-right landing from the remote's far-left edge")
+	}
+}
+
+func TestAcceptsReclaim_RightEdgeOnlyAcceptsLocalRightLanding(t *testing.T) {
+	c := &Capturer{edgeSide: "right"}
+	if !c.AcceptsReclaim(65000) {
+		t.Fatal("right-edge setup should accept a NextMachine landing near local right edge")
+	}
+	if c.AcceptsReclaim(1200) {
+		t.Fatal("right-edge setup must reject far-left landing from the remote's far-right edge")
+	}
+}
+
+func TestAcceptsActivation_LeftEdgeOnlyAcceptsRemoteRightEdge(t *testing.T) {
+	c := &Capturer{active: false, edgeSide: "left", remoteW: 1920, remoteX: 1919}
+	if !c.AcceptsActivation() {
+		t.Fatal("left-edge setup should accept MachineSwitched from remote right/shared edge")
+	}
+	c.remoteX = 1720
+	if c.AcceptsActivation() {
+		t.Fatal("left-edge setup must reject MachineSwitched at the 200px remote entry offset")
+	}
+	c.remoteX = 0
+	if c.AcceptsActivation() {
+		t.Fatal("left-edge setup must reject MachineSwitched from remote far-left edge")
+	}
+}
+
+func TestAcceptsActivation_RightEdgeOnlyAcceptsRemoteLeftEdge(t *testing.T) {
+	c := &Capturer{active: false, edgeSide: "right", remoteW: 1920, remoteX: 0}
+	if !c.AcceptsActivation() {
+		t.Fatal("right-edge setup should accept MachineSwitched from remote left/shared edge")
+	}
+	c.remoteX = 200
+	if c.AcceptsActivation() {
+		t.Fatal("right-edge setup must reject MachineSwitched at the 200px remote entry offset")
+	}
+	c.remoteX = 1919
+	if c.AcceptsActivation() {
+		t.Fatal("right-edge setup must reject MachineSwitched from remote far-right edge")
+	}
+}
+
 // --- SetActive mutex invariant ---
 
 // SetActive must NOT hold c.mu when calling enableXinput.
