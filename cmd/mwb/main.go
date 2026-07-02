@@ -159,6 +159,10 @@ func main() {
 				// Cursor speed: the only acceleration knob lives here (Windows
 				// applies none of its own), so honor the configured multiplier.
 				cap.SetAccelMultiplier(cfg.AccelMultiplier)
+				handler.ShouldReclaim = func(requestX, _ int32, _ int32) bool {
+					return cap.AcceptsReclaim(requestX)
+				}
+				handler.ShouldActivate = cap.AcceptsActivation
 
 				// When we receive MachineSwitched, mark ourselves as active and
 				// move cursor away from edge — without this the cursor stays at

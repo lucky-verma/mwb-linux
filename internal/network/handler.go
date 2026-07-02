@@ -35,8 +35,12 @@ type Handler struct {
 	Keyboard    KeyboardDevice
 	Clipboard   ClipboardHandler // optional clipboard handler
 	OnActivated func()           // called when remote sends MachineSwitched
-	OnReclaimed func()           // called when server sends NextMachine (cursor bounced back)
-	ActivatedAt *time.Time       // when cursor last arrived — skip mouse injection briefly
+	// ShouldActivate optionally rejects MachineSwitched packets from the wrong edge.
+	ShouldActivate func() bool
+	OnReclaimed    func() // called when server sends NextMachine from the shared edge
+	// ShouldReclaim optionally rejects NextMachine packets from the wrong edge.
+	ShouldReclaim func(requestX, requestY, targetID int32) bool
+	ActivatedAt   *time.Time // when cursor last arrived — skip mouse injection briefly
 
 	// InboundMultiplier scales Windows->Linux cursor movement. 1.0 = mirror
 	// Windows 1:1 (the default). Inbound is absolute, so this applies a constant
@@ -66,6 +70,10 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 	case protocol.Keyboard:
 		h.handleKeyboard(pkt)
 	case protocol.MachineSwitched:
+		if h.ShouldActivate != nil && !h.ShouldActivate() {
+			slog.Debug("MachineSwitched ignored — remote cursor is not on our shared edge", "src", pkt.Src)
+			return
+		}
 		slog.Info("MachineSwitched: cursor switched to us", "src", pkt.Src)
 		now := time.Now()
 		h.ActivatedAt = &now
@@ -76,9 +84,15 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 	case protocol.HideMouse:
 		slog.Debug("HideMouse received — cursor leaving us", "src", pkt.Src)
 	case protocol.NextMachine:
-		slog.Info("NextMachine received — server wants us to take cursor back",
-			"src", pkt.Src, "des", pkt.Des, "targetID", pkt.Mouse.WheelDelta)
-		// Server's cursor hit an edge toward us — reclaim local control
+		if h.ShouldReclaim != nil && !h.ShouldReclaim(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta) {
+			slog.Debug("NextMachine ignored — requested landing point is not on our shared edge",
+				"targetID", pkt.Mouse.WheelDelta, "requestX", pkt.Mouse.X, "requestY", pkt.Mouse.Y)
+			return
+		}
+		slog.Info("NextMachine accepted — server wants us to take cursor back",
+			"src", pkt.Src, "des", pkt.Des, "targetID", pkt.Mouse.WheelDelta,
+			"requestX", pkt.Mouse.X, "requestY", pkt.Mouse.Y)
+		// Server's cursor hit the edge shared with us — reclaim local control.
 		if h.OnReclaimed != nil {
 			h.OnReclaimed()
 		}

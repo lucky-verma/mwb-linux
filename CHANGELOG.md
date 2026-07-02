@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   handoff on startup.
 - Installers now remove the legacy root `mwb-linux.service` if present, because
   it can keep port 15101 bound and force bidirectional mode after an upgrade.
+- **False return from remote far edge**: `MachineSwitched` and `NextMachine`
+  packets are now accepted only when the requested return matches the Linux
+  edge configured by `-edge`. This prevents a remote laptop on Ubuntu's left
+  from handing control back to Ubuntu when the cursor touches the remote
+  laptop's far-left edge because Windows has a rotated matrix or wrap-style
+  behavior.
 
 ## [0.5.0] - 2026-06-29
 

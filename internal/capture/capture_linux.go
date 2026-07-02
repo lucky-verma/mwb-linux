@@ -39,6 +39,18 @@ const (
 	// Default scaling applied to raw evdev deltas. Approximates libinput's flat
 	// profile (speed 0.766 → ~1.766, rounded to 2). Overridable via config.
 	defaultAccelMultiplier = 2.0
+
+	// NextMachine landing requests use MWB's 0-65535 absolute coordinate space.
+	// A legitimate reclaim must land on the local edge that is physically shared
+	// with the remote. The margin is intentionally broad enough for MWB's tiny
+	// 2px jump plus rounding, but narrow enough to reject the opposite far edge.
+	reclaimEdgeMargin = 8192
+
+	// remoteReturnMargin is in remote-screen pixels, not 0-65535 wire units.
+	// It must be smaller than the 200px remote entry offset, otherwise a
+	// MachineSwitched notification at the entry position can bounce straight
+	// back before the cursor reaches the real shared edge.
+	remoteReturnMargin = 64
 )
 
 type inputEvent struct {
@@ -144,6 +156,50 @@ func (c *Capturer) SafeEntryPosition() (x, y int32) {
 		x = c.screen.Width / 2
 	}
 	return x, y
+}
+
+// AcceptsReclaim reports whether a remote NextMachine request is returning
+// through the edge this Linux screen actually shares with the remote machine.
+func (c *Capturer) AcceptsReclaim(requestX int32) bool {
+	c.mu.Lock()
+	edgeSide := c.edgeSide
+	c.mu.Unlock()
+
+	switch edgeSide {
+	case "left":
+		return requestX <= reclaimEdgeMargin
+	case "right":
+		return requestX >= 65535-reclaimEdgeMargin
+	default:
+		return true
+	}
+}
+
+// AcceptsActivation reports whether a MachineSwitched notification is
+// compatible with the edge this Linux screen shares with the remote. Windows can
+// emit MachineSwitched from the remote machine's far edge if its matrix wraps or
+// is rotated; that must not bring local control back.
+func (c *Capturer) AcceptsActivation() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.active {
+		return true
+	}
+
+	remoteW := c.remoteW
+	if remoteW <= 0 {
+		remoteW = defaultRemoteWidth
+	}
+
+	switch c.edgeSide {
+	case "left":
+		return c.remoteX >= remoteW-remoteReturnMargin
+	case "right":
+		return c.remoteX <= remoteReturnMargin
+	default:
+		return true
+	}
 }
 
 // UpdateRemoteScreen detects remote screen dimensions from incoming Mouse packets.
