@@ -52,6 +52,12 @@ No extra software needed on Windows beyond PowerToys, which bundles Mouse Withou
 
 ## Demo
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="Cursor crossing from Windows to the Linux machine over Mouse Without Borders" width="720">
+</p>
+
+<p align="center"><sub>Move the cursor to the screen edge and it jumps from Windows to the Linux box.</sub></p>
+
 | Direction | What happens |
 |-----------|-------------|
 | Mouse hits left edge on Linux | Cursor appears on Windows, Linux input disabled |
