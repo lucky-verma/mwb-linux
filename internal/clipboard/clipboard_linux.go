@@ -327,14 +327,29 @@ func (m *Manager) handleImageClipboard(data []byte) {
 		}
 	}
 
-	// Write to temp file
+	// Write to a private temp file. os.CreateTemp uses a random name with
+	// O_EXCL and mode 0600, which avoids the symlink/predictable-name attack of
+	// a fixed /tmp path: a local user can no longer pre-create the path as a
+	// symlink to overwrite an arbitrary file with attacker-controlled bytes,
+	// nor read the clipboard image out of a world-readable file.
 	ext := ".bmp"
 	if mimeType == "image/png" {
 		ext = ".png"
 	}
-	tmpFile := "/tmp/mwb-clipboard-image" + ext
-	if err := os.WriteFile(tmpFile, imgData, 0644); err != nil {
+	tmpF, err := os.CreateTemp("", "mwb-clipboard-image-*"+ext)
+	if err != nil {
+		slog.Error("create clipboard image temp file failed", "err", err)
+		return
+	}
+	tmpFile := tmpF.Name()
+	defer func() { _ = os.Remove(tmpFile) }()
+	if _, err := tmpF.Write(imgData); err != nil {
+		_ = tmpF.Close()
 		slog.Error("write clipboard image failed", "err", err)
+		return
+	}
+	if err := tmpF.Close(); err != nil {
+		slog.Error("close clipboard image temp file failed", "err", err)
 		return
 	}
 
@@ -342,7 +357,7 @@ func (m *Manager) handleImageClipboard(data []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
 	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", mimeType, "-i", tmpFile)
 	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	err := cmd.Run()
+	err = cmd.Run()
 	cancel()
 	if err != nil {
 		slog.Error("set image clipboard via xclip failed", "err", err, "mime", mimeType)
