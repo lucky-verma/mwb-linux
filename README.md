@@ -174,6 +174,27 @@ MWB Linux implements the full Mouse Without Borders protocol:
 
 For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Security
+
+Mouse Without Borders lets a remote machine inject keyboard and mouse input into
+your Linux session, so treat it like remote control and run it only on networks
+and machines you trust.
+
+- **Trusted peer only.** The client accepts inbound connections **only from the
+  IP configured in `host`**; connections from any other source are rejected and
+  logged. No extra configuration is required — it reuses the `host` you already
+  set. (The outbound connection is unchanged.)
+- **One shared secret.** All protection comes from the `key`. Use a long, random
+  key — anyone who obtains it and can reach the port can send input.
+- **Firewall.** Only expose ports **15100–15101** to your trusted LAN. Block them
+  from the internet, and avoid using the client on untrusted/public Wi-Fi.
+- **No sudo.** Run as your normal user (in the `input` group); `sudo mwb` can
+  attach to the wrong session and is unnecessary.
+
+The transport uses the original MWB AES-256-CBC scheme, which is not
+authenticated encryption — an attacker able to intercept LAN traffic could
+tamper with or replay packets. Keep the client on a trusted network segment.
+
 ## Configuration
 
 ### config.toml
