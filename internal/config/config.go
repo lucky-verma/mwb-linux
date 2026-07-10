@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/BurntSushi/toml"
@@ -76,7 +77,33 @@ func Load(path string) (*Config, error) {
 	if cfg.Edge == "" {
 		cfg.Edge = "left"
 	}
+
+	// The config holds the plaintext security key — the only secret protecting
+	// input injection. Tighten permissions to owner-only (0600) so other local
+	// accounts can't read it. This self-heals older installs whose file was
+	// created world-readable (0644) without requiring a manual chmod.
+	if err := secureConfigPermissions(path); err != nil {
+		slog.Warn("could not tighten config file permissions", "path", path, "err", err)
+	}
+	if len(cfg.Key) < 12 {
+		slog.Warn("security key is short; use a long, random key — it is the only secret protecting keyboard/mouse injection",
+			"length", len(cfg.Key))
+	}
+
 	return &cfg, nil
+}
+
+// secureConfigPermissions restricts the config file to 0600 (owner read/write)
+// if it is currently group- or world-accessible.
+func secureConfigPermissions(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o077 == 0 {
+		return nil // already 0600 or tighter
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func (c *Config) MessagePort() int {
