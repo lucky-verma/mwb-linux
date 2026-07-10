@@ -30,6 +30,13 @@ const (
 	textTypeSep   = "{4CFF57F7-BEDD-43d5-AE8F-27A61E886F2F}"
 	maxInlineSize = 1048576     // 1 MB — max for inline TCP send
 	maxRecvBuf    = 2 * 1048576 // 2 MB — max in-flight clipboard receive buffer
+
+	// maxDecompressedSize caps the inflated size of an inbound clipboard payload.
+	// maxRecvBuf only bounds the *compressed* bytes; DEFLATE can expand ~1000:1,
+	// so without an output cap a few MB of crafted data can inflate to gigabytes
+	// and exhaust memory (decompression bomb). 32 MB is far above any real
+	// clipboard payload while bounding worst-case allocation.
+	maxDecompressedSize = 32 * 1048576 // 32 MB
 )
 
 // Manager handles clipboard synchronization.
@@ -544,11 +551,20 @@ func deflateCompress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// deflateDecompress decompresses Deflate data.
+// deflateDecompress decompresses Deflate data, refusing output larger than
+// maxDecompressedSize to guard against decompression bombs.
 func deflateDecompress(data []byte) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(data))
 	defer r.Close() //nolint:errcheck
-	return io.ReadAll(r)
+	// Read one byte past the limit so we can detect an over-limit stream.
+	out, err := io.ReadAll(io.LimitReader(r, maxDecompressedSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxDecompressedSize {
+		return nil, fmt.Errorf("decompressed clipboard exceeds %d byte limit", maxDecompressedSize)
+	}
+	return out, nil
 }
 
 func min(a, b int) int {
