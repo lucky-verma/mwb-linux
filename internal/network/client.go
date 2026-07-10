@@ -134,10 +134,49 @@ func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Con
 	return conn, nil
 }
 
+// isAllowedPeer reports whether addr's IP matches allowedHost. allowedHost may
+// be an IP literal or a hostname (resolved via DNS to handle DHCP changes). An
+// empty allowedHost disables the check. This lets the client accept inbound
+// connections only from its configured peer instead of from any host that can
+// reach the listening port.
+func isAllowedPeer(addr net.Addr, allowedHost string) bool {
+	if allowedHost == "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		host = addr.String()
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	// allowedHost may already be an IP literal; ParseIP handles that without DNS.
+	if allowed := net.ParseIP(allowedHost); allowed != nil {
+		return allowed.Equal(ip)
+	}
+	allowedIPs, err := net.LookupHost(allowedHost)
+	if err != nil {
+		return false
+	}
+	for _, a := range allowedIPs {
+		if p := net.ParseIP(a); p != nil && p.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListenAndAccept starts a TCP server on the given port and sends accepted
 // connections (after handshake) to the returned channel. This allows Windows
 // MWB to connect TO us, which is faster after lock/reconnect cycles.
-func ListenAndAccept(port int, securityKey, machineName string, stop chan struct{}) (chan *Conn, error) {
+//
+// allowedHost restricts which source may connect: only a peer whose IP matches
+// the configured host (cfg.Host) is accepted. The client only ever talks to one
+// peer, so accepting inbound connections from any other source on the network
+// would let any device that guesses the key inject keyboard/mouse input. An
+// empty allowedHost disables the check (accept from anyone).
+func ListenAndAccept(port int, securityKey, machineName, allowedHost string, stop chan struct{}) (chan *Conn, error) {
 	connCh := make(chan *Conn, 1)
 	addr := fmt.Sprintf(":%d", port)
 	ln, err := net.Listen("tcp", addr)
@@ -148,7 +187,7 @@ func ListenAndAccept(port int, securityKey, machineName string, stop chan struct
 	go func() {
 		defer close(connCh)
 		defer func() { _ = ln.Close() }()
-		slog.Info("listening for incoming MWB connections", "port", port)
+		slog.Info("listening for incoming MWB connections", "port", port, "allowedHost", allowedHost)
 
 		for {
 			select {
@@ -168,6 +207,16 @@ func ListenAndAccept(port int, securityKey, machineName string, stop chan struct
 					continue
 				}
 				slog.Debug("accept error", "err", err)
+				continue
+			}
+
+			// Reject any source that is not the configured peer. This is the
+			// primary control that keeps an unknown host on the network from
+			// even reaching the key handshake.
+			if !isAllowedPeer(raw.RemoteAddr(), allowedHost) {
+				slog.Warn("rejected inbound connection from unexpected source",
+					"remote", raw.RemoteAddr(), "allowedHost", allowedHost)
+				_ = raw.Close()
 				continue
 			}
 
