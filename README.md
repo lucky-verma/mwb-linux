@@ -192,6 +192,12 @@ For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 | `inbound_multiplier` | 1.0 | Cursor speed when Windows controls Linux. `1.0` mirrors Windows exactly; raise it for faster inbound movement |
 | `keyboard_layout` | auto | Inbound Windows-to-Linux keyboard mapping. `auto` detects the local Linux layout when possible; supported profiles include `us`, `de`, `fr`, `be`, `es`, `it`, `gb`, `pt`, `no`/`dk`/`se`/`fi`, `ch`, and `nl` |
 
+> **Config file security:** `config.toml` stores the security key in plaintext.
+> The installer creates it with `0600` permissions (owner-only), and `mwb`
+> tightens an existing config to `0600` on startup so other local accounts can't
+> read the key. Use a long, random key — `mwb` logs a warning if the configured
+> key is very short.
+
 ### CLI Flags
 
 | Flag | Default | Description |
