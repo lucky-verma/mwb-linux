@@ -113,29 +113,25 @@ func main() {
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.MessagePort())
 			slog.Info("connecting", "addr", addr)
 
-			connCh := make(chan *network.Conn, 1)
-			go func() {
-				c, err := network.Connect(addr, cfg.Key, cfg.Name, 10*time.Second)
-				if err != nil {
-					slog.Debug("outbound connect failed", "err", err)
-					return
-				}
-				// Non-blocking send: if inbound already won the race, close this conn
-				select {
-				case connCh <- c:
-				default:
-					_ = c.Close()
-				}
-			}()
+			connectStop := make(chan struct{})
+			outgoingCh := network.ConnectWithRetry(
+				addr,
+				cfg.Key,
+				cfg.Name,
+				10*time.Second,
+				time.Second,
+				connectStop,
+			)
 
 			// Wait for either outbound or inbound connection
 			var conn *network.Conn
 			select {
-			case conn = <-connCh:
+			case conn = <-outgoingCh:
 				slog.Info("connected (outbound)", "remote", conn.RemoteName)
 			case conn = <-incomingCh:
 				slog.Info("connected (inbound)", "remote", conn.RemoteName)
 			}
+			close(connectStop)
 
 			// Start clipboard sharing on the auto-detected display unless disabled.
 			var clipMgr *clipboard.Manager

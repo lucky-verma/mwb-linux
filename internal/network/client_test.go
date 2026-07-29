@@ -3,9 +3,11 @@ package network
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,5 +154,57 @@ func TestListenAndAcceptReturnsBindError(t *testing.T) {
 	}
 	if connCh != nil {
 		t.Fatalf("expected nil connection channel on bind error, got %v", connCh)
+	}
+}
+
+func TestConnectWithRetryRetriesUntilSuccess(t *testing.T) {
+	stop := make(chan struct{})
+	want := &Conn{}
+	var attempts atomic.Int32
+
+	connCh := connectWithRetry(stop, time.Millisecond, func() (*Conn, error) {
+		if attempts.Add(1) < 3 {
+			return nil, errors.New("server unavailable")
+		}
+		return want, nil
+	})
+
+	select {
+	case got := <-connCh:
+		if got != want {
+			t.Fatalf("connection = %p, want %p", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for retried connection")
+	}
+
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want 3", got)
+	}
+}
+
+func TestConnectWithRetryStopsDuringDelay(t *testing.T) {
+	stop := make(chan struct{})
+	attempted := make(chan struct{}, 1)
+
+	connCh := connectWithRetry(stop, time.Hour, func() (*Conn, error) {
+		attempted <- struct{}{}
+		return nil, errors.New("server unavailable")
+	})
+
+	select {
+	case <-attempted:
+	case <-time.After(time.Second):
+		t.Fatal("initial connection attempt did not run")
+	}
+
+	close(stop)
+	select {
+	case conn, ok := <-connCh:
+		if ok {
+			t.Fatalf("unexpected connection after stop: %v", conn)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retry loop did not stop")
 	}
 }

@@ -134,6 +134,60 @@ func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Con
 	return conn, nil
 }
 
+// ConnectWithRetry keeps trying an outbound connection until one succeeds or
+// stop is closed. The returned channel is intentionally unbuffered: if an
+// inbound connection wins the race, closing stop guarantees that a concurrent
+// outbound connection is closed instead of being left queued and leaked.
+func ConnectWithRetry(
+	addr, securityKey, machineName string,
+	timeout, retryDelay time.Duration,
+	stop <-chan struct{},
+) <-chan *Conn {
+	return connectWithRetry(stop, retryDelay, func() (*Conn, error) {
+		return Connect(addr, securityKey, machineName, timeout)
+	})
+}
+
+func connectWithRetry(
+	stop <-chan struct{},
+	retryDelay time.Duration,
+	connect func() (*Conn, error),
+) <-chan *Conn {
+	connCh := make(chan *Conn)
+
+	go func() {
+		defer close(connCh)
+
+		for {
+			conn, err := connect()
+			if err == nil {
+				select {
+				case connCh <- conn:
+				case <-stop:
+					_ = conn.Close()
+				}
+				return
+			}
+
+			slog.Debug("outbound connect failed; retrying", "err", err, "delay", retryDelay)
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-timer.C:
+			case <-stop:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			}
+		}
+	}()
+
+	return connCh
+}
+
 // ListenAndAccept starts a TCP server on the given port and sends accepted
 // connections (after handshake) to the returned channel. This allows Windows
 // MWB to connect TO us, which is faster after lock/reconnect cycles.
