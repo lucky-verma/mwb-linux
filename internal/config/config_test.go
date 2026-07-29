@@ -182,3 +182,28 @@ func TestLoadConfigValidation(t *testing.T) {
 		t.Error("should fail without key")
 	}
 }
+
+func TestLoadTightensConfigPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+`), 0664); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0664); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("config permissions = %04o, want 0600", got)
+	}
+}

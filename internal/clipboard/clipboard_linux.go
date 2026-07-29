@@ -10,6 +10,7 @@ import (
 	"compress/flate"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,10 +35,12 @@ const (
 	// maxDecompressedSize caps the inflated size of an inbound clipboard payload.
 	// maxRecvBuf only bounds the *compressed* bytes; DEFLATE can expand ~1000:1,
 	// so without an output cap a few MB of crafted data can inflate to gigabytes
-	// and exhaust memory (decompression bomb). 32 MB is far above any real
-	// clipboard payload while bounding worst-case allocation.
-	maxDecompressedSize = 32 * 1048576 // 32 MB
+	// and exhaust memory (decompression bomb). 64 MiB accommodates large,
+	// high-resolution clipboard images while bounding worst-case allocation.
+	maxDecompressedSize = 64 * 1048576
 )
+
+var errDecompressedTooLarge = errors.New("decompressed clipboard exceeds size limit")
 
 // Manager handles clipboard synchronization.
 type Manager struct {
@@ -263,6 +266,10 @@ func (m *Manager) handleEnd(pkt *protocol.Packet) {
 		// Try decompress first, fall back to raw data
 		decompressed, err := deflateDecompress(data)
 		if err != nil {
+			if errors.Is(err, errDecompressedTooLarge) {
+				slog.Warn("rejected oversized image clipboard", "err", err, "dataLen", len(data))
+				return
+			}
 			slog.Info("image clipboard not deflate-compressed, using raw data", "dataLen", len(data))
 			m.handleImageClipboard(data)
 		} else {
@@ -334,43 +341,20 @@ func (m *Manager) handleImageClipboard(data []byte) {
 		}
 	}
 
-	// Write to a private temp file. os.CreateTemp uses a random name with
-	// O_EXCL and mode 0600, which avoids the symlink/predictable-name attack of
-	// a fixed /tmp path: a local user can no longer pre-create the path as a
-	// symlink to overwrite an arbitrary file with attacker-controlled bytes,
-	// nor read the clipboard image out of a world-readable file.
-	ext := ".bmp"
-	if mimeType == "image/png" {
-		ext = ".png"
-	}
-	tmpF, err := os.CreateTemp("", "mwb-clipboard-image-*"+ext)
-	if err != nil {
-		slog.Error("create clipboard image temp file failed", "err", err)
-		return
-	}
-	tmpFile := tmpF.Name()
-	defer func() { _ = os.Remove(tmpFile) }()
-	if _, err := tmpF.Write(imgData); err != nil {
-		_ = tmpF.Close()
-		slog.Error("write clipboard image failed", "err", err)
-		return
-	}
-	if err := tmpF.Close(); err != nil {
-		slog.Error("close clipboard image temp file failed", "err", err)
-		return
-	}
-
-	// Set image clipboard via xclip
+	// Feed image bytes directly to xclip. Avoiding a temporary file eliminates
+	// predictable-path, symlink, and local clipboard-disclosure risks entirely.
 	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", mimeType, "-i", tmpFile)
+	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", mimeType, "-i")
 	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	err = cmd.Run()
+	cmd.Stdin = bytes.NewReader(imgData)
+	err := cmd.Run()
 	cancel()
 	if err != nil {
 		slog.Error("set image clipboard via xclip failed", "err", err, "mime", mimeType)
 		ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-		cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-i", tmpFile)
+		cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
 		cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
+		cmd2.Stdin = bytes.NewReader(imgData)
 		if err2 := cmd2.Run(); err2 != nil {
 			slog.Error("set image clipboard fallback also failed", "err", err2)
 		}
@@ -554,15 +538,19 @@ func deflateCompress(data []byte) ([]byte, error) {
 // deflateDecompress decompresses Deflate data, refusing output larger than
 // maxDecompressedSize to guard against decompression bombs.
 func deflateDecompress(data []byte) ([]byte, error) {
+	return deflateDecompressLimit(data, maxDecompressedSize)
+}
+
+func deflateDecompressLimit(data []byte, limit int64) ([]byte, error) {
 	r := flate.NewReader(bytes.NewReader(data))
 	defer r.Close() //nolint:errcheck
 	// Read one byte past the limit so we can detect an over-limit stream.
-	out, err := io.ReadAll(io.LimitReader(r, maxDecompressedSize+1))
+	out, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(out) > maxDecompressedSize {
-		return nil, fmt.Errorf("decompressed clipboard exceeds %d byte limit", maxDecompressedSize)
+	if int64(len(out)) > limit {
+		return nil, fmt.Errorf("%w: %d bytes", errDecompressedTooLarge, limit)
 	}
 	return out, nil
 }
