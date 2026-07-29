@@ -97,9 +97,10 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start TCP server to accept incoming connections from Windows MWB
+	// Start TCP server to accept incoming connections from Windows MWB.
+	// Only the configured host (cfg.Host) is accepted as an inbound peer.
 	serverStop := make(chan struct{})
-	incomingCh, err := network.ListenAndAccept(cfg.MessagePort(), cfg.Key, cfg.Name, serverStop)
+	incomingCh, err := network.ListenAndAccept(cfg.MessagePort(), cfg.Key, cfg.Name, cfg.Host, serverStop)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error starting listener: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Is another mwb instance already running?")

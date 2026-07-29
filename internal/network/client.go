@@ -2,6 +2,7 @@
 package network
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -12,6 +13,12 @@ import (
 	"time"
 
 	"github.com/lucky-verma/mwb-linux/internal/protocol"
+)
+
+const (
+	handshakeTimeout      = 10 * time.Second
+	peerResolutionTimeout = 3 * time.Second
+	maxPendingHandshakes  = 4
 )
 
 // Conn represents an established, encrypted MWB connection.
@@ -50,9 +57,16 @@ func getCachedKeyMaterial(securityKey string) ([]byte, []byte, uint32) {
 	return cachedAESKey, cachedIV, cachedMagic
 }
 
-// setupConn configures TCP options, creates crypto streams, exchanges IV,
-// and performs handshake on an already-established TCP connection.
-func setupConn(raw net.Conn, securityKey, machineName string) (*Conn, error) {
+// setupConn configures TCP options, creates crypto streams, exchanges IV, and
+// performs a deadline-bounded handshake on an established TCP connection.
+func setupConn(raw net.Conn, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
+	if timeout <= 0 {
+		timeout = handshakeTimeout
+	}
+	if err := raw.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("set handshake deadline: %w", err)
+	}
+
 	aesKey, iv, magic := getCachedKeyMaterial(securityKey)
 
 	if tc, ok := raw.(*net.TCPConn); ok {
@@ -115,6 +129,9 @@ func setupConn(raw net.Conn, securityKey, machineName string) (*Conn, error) {
 	if err := c.SendPacket(hb); err != nil {
 		return nil, fmt.Errorf("send heartbeat: %w", err)
 	}
+	if err := raw.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("clear handshake deadline: %w", err)
+	}
 
 	return c, nil
 }
@@ -126,7 +143,7 @@ func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Con
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 
-	conn, err := setupConn(raw, securityKey, machineName)
+	conn, err := setupConn(raw, securityKey, machineName, timeout)
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -188,11 +205,68 @@ func connectWithRetry(
 	return connCh
 }
 
+// resolveAllowedPeer resolves the configured host once when the listener
+// starts. Keeping DNS out of the accept loop prevents untrusted connection
+// attempts from triggering repeated blocking lookups.
+func resolveAllowedPeer(allowedHost string) ([]net.IP, error) {
+	if allowedHost == "" {
+		return nil, fmt.Errorf("configured host is empty")
+	}
+	if ip := net.ParseIP(allowedHost); ip != nil {
+		return []net.IP{ip}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), peerResolutionTimeout)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", allowedHost)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no IP addresses found")
+	}
+	return ips, nil
+}
+
+// isAllowedPeer reports whether addr belongs to the peer resolved from the
+// configured host. An empty allowlist rejects every connection (fail closed).
+func isAllowedPeer(addr net.Addr, allowedIPs []net.IP) bool {
+	var remoteIP net.IP
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		remoteIP = tcpAddr.IP
+	} else {
+		host, _, err := net.SplitHostPort(addr.String())
+		if err != nil {
+			return false
+		}
+		remoteIP = net.ParseIP(host)
+	}
+	if remoteIP == nil {
+		return false
+	}
+	for _, allowedIP := range allowedIPs {
+		if allowedIP.Equal(remoteIP) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListenAndAccept starts a TCP server on the given port and sends accepted
 // connections (after handshake) to the returned channel. This allows Windows
 // MWB to connect TO us, which is faster after lock/reconnect cycles.
-func ListenAndAccept(port int, securityKey, machineName string, stop chan struct{}) (chan *Conn, error) {
+//
+// allowedHost restricts inbound connections to the configured peer. Hostnames
+// are resolved once at listener startup; resolution failure disables inbound
+// connections while leaving the outbound retry path available.
+func ListenAndAccept(port int, securityKey, machineName, allowedHost string, stop chan struct{}) (chan *Conn, error) {
 	connCh := make(chan *Conn, 1)
+	allowedIPs, resolveErr := resolveAllowedPeer(allowedHost)
+	if resolveErr != nil {
+		slog.Warn("could not resolve configured inbound peer; inbound connections disabled",
+			"host", allowedHost, "err", resolveErr)
+	}
+
 	addr := fmt.Sprintf(":%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -200,9 +274,16 @@ func ListenAndAccept(port int, securityKey, machineName string, stop chan struct
 	}
 
 	go func() {
-		defer close(connCh)
 		defer func() { _ = ln.Close() }()
-		slog.Info("listening for incoming MWB connections", "port", port)
+		var handshakes sync.WaitGroup
+		defer func() {
+			handshakes.Wait()
+			close(connCh)
+		}()
+		pending := make(chan struct{}, maxPendingHandshakes)
+
+		slog.Info("listening for incoming MWB connections",
+			"port", port, "allowedHost", allowedHost, "allowedIPs", allowedIPs)
 
 		for {
 			select {
@@ -225,21 +306,45 @@ func ListenAndAccept(port int, securityKey, machineName string, stop chan struct
 				continue
 			}
 
-			slog.Info("incoming connection", "remote", raw.RemoteAddr())
-			conn, err := setupConn(raw, securityKey, machineName)
-			if err != nil {
-				slog.Error("incoming handshake failed", "err", err)
+			// Reject any source that is not the configured peer before it can
+			// consume handshake work. The shared key remains the authentication
+			// control; the IP allowlist is defense in depth.
+			if !isAllowedPeer(raw.RemoteAddr(), allowedIPs) {
+				slog.Warn("rejected inbound connection from unexpected source",
+					"remote", raw.RemoteAddr(), "allowedHost", allowedHost)
 				_ = raw.Close()
 				continue
 			}
 
-			slog.Info("incoming connection established", "remote", conn.RemoteName)
 			select {
-			case connCh <- conn:
-			case <-stop:
-				_ = conn.Close()
-				return
+			case pending <- struct{}{}:
+			default:
+				slog.Warn("rejected inbound connection: too many pending handshakes",
+					"remote", raw.RemoteAddr())
+				_ = raw.Close()
+				continue
 			}
+
+			handshakes.Add(1)
+			go func(raw net.Conn) {
+				defer handshakes.Done()
+				defer func() { <-pending }()
+
+				slog.Info("incoming connection", "remote", raw.RemoteAddr())
+				conn, err := setupConn(raw, securityKey, machineName, handshakeTimeout)
+				if err != nil {
+					slog.Error("incoming handshake failed", "remote", raw.RemoteAddr(), "err", err)
+					_ = raw.Close()
+					return
+				}
+
+				slog.Info("incoming connection established", "remote", conn.RemoteName)
+				select {
+				case connCh <- conn:
+				case <-stop:
+					_ = conn.Close()
+				}
+			}(raw)
 		}
 	}()
 
@@ -276,10 +381,8 @@ func (c *Conn) doHandshake(machineName string) error {
 		}
 	}
 
-	// Read packets until we get a valid HandshakeAck
-	_ = c.raw.SetReadDeadline(time.Now().Add(10 * time.Second))
-	defer func() { _ = c.raw.SetReadDeadline(time.Time{}) }()
-
+	// Read packets until we get a valid HandshakeAck. setupConn applies the
+	// deadline for the full IV exchange and handshake, including writes.
 	for i := 0; i < 20; i++ {
 		pkt, err := c.RecvPacket()
 		if err != nil {
