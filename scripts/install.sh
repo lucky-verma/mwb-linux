@@ -89,11 +89,16 @@ name = "linux"                # This machine's name (max 15 chars)
 # accel_multiplier = 2.0      # Linux -> Windows cursor speed
 # inbound_multiplier = 1.0    # Windows -> Linux cursor speed
 EOF
-    chown "${ACTUAL_USER}:${ACTUAL_USER}" "${CONFIG_DIR}/config.toml"
     echo "  Config template created at ${CONFIG_DIR}/config.toml"
 else
     echo "  Config already exists at ${CONFIG_DIR}/config.toml"
 fi
+# The config holds the plaintext security key — keep it owner-only so no other
+# local account can read it (0700 dir, 0600 file).
+chown "${ACTUAL_USER}:${ACTUAL_USER}" "${CONFIG_DIR}"
+chmod 700 "${CONFIG_DIR}"
+chown "${ACTUAL_USER}:${ACTUAL_USER}" "${CONFIG_DIR}/config.toml"
+chmod 600 "${CONFIG_DIR}/config.toml"
 
 echo "[6/6] Installing systemd user service..."
 if command -v systemctl >/dev/null 2>&1 && \
