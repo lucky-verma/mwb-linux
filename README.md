@@ -98,6 +98,17 @@ sudo udevadm control --reload-rules
 sudo usermod -aG input $USER
 ```
 
+### With Go
+
+```bash
+go install github.com/lucky-verma/mwb-linux/cmd/mwb@latest
+```
+
+Puts `mwb` in `$(go env GOPATH)/bin`. You still need the system dependencies and
+permissions from [From Binary](#from-binary): `xdotool`/`xclip`, the `uinput`
+module, the udev rule, and membership of the `input` group. This build reports
+`dev` for `mwb version`, since the release ldflags are not applied.
+
 ### From Source
 
 ```bash
