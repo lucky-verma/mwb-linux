@@ -25,3 +25,6 @@ Thumbs.db
 .env
 *.key
 *.pem
+
+# local knowledge-graph artifacts
+graphify-out/

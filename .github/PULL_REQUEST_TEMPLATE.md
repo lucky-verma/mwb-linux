@@ -18,18 +18,21 @@
 - [ ] After Windows screen lock + unlock: cursor recovers without restart
 - [ ] Clipboard text: copy on Ubuntu, paste on Windows (and reverse)
 
-### xinput safety (required for any capture/ change)
-- [ ] Wooting devices show `[slave pointer/keyboard]` (not `[floating slave]`) after restart
-- [ ] Razer devices show `[slave pointer/keyboard]` (not `[floating slave]`) after restart
-- [ ] After switch → return: `xinput list-props <id> | grep "Device Enabled"` shows `1` for all Wooting/Razer
+### Input isolation safety (required for any capture/ change)
+- [ ] After switch → return: local mouse and keyboard both work again
+- [ ] `kill -9` the process mid-switch, while the cursor is on the remote: local input must come back on its own (the kernel drops EVIOCGRAB when the fd closes)
+- [ ] Log line on switch reads `grabbed local input devices count=N of=N` — a lower count means a device leaked to the local display
+- [ ] The physical power button still works while the cursor is on the remote
+- [ ] Remote typing and clicking still land locally (mwb's own uinput devices must never be grabbed)
 
 ## Checklist
 
 - [ ] Public text and metadata do not include private hostnames, usernames, machine names, internal paths, private domains, or personal email addresses
 - [ ] Package/release metadata uses an intentional public contact address
 - [ ] No mutex held when calling a method that also acquires that mutex
-- [ ] `enableXinput()` only called when `disabledXinputIDs` is non-empty OR as cleanup
-- [ ] `parseXinputIDs` / `getXinputIDs` excludes `[floating slave]` devices
+- [ ] `isGrabTarget` classifies by capability bitmask, never by vendor or product name
+- [ ] Virtual (uinput) devices are excluded from grabbing
+- [ ] New `/dev/input` device nodes are opened with `O_NONBLOCK` so `Close()` can interrupt a pending read
 - [ ] `OnActivated` and `OnReclaimed` both move cursor away from edge after switch
 - [ ] Any new goroutine is tracked in a `WaitGroup` and has a stop path
 - [ ] Any new `exec.Command` has a `context.WithTimeout`

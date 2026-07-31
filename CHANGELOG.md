@@ -6,6 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `mwb update` downloads and installs the latest GitHub release, verifying it
+  against the SHA-256 in that release's `checksums.txt` and replacing the binary
+  atomically. `--check` reports availability without installing; `--force`
+  reinstalls. Refuses to overwrite a dpkg-managed install, and explains the
+  `sudo` requirement instead of failing with a bare permission error.
+- `mwb version` prints the installed version. The release pipeline already
+  passed `-X main.version`, but no such variable existed, so the flag was
+  silently doing nothing and every build was unversioned.
+
+### Changed
+- **Device isolation now uses `EVIOCGRAB` instead of `xinput disable`.** The
+  grab is owned by the file descriptor, so the kernel restores local input when
+  mwb's descriptors close — including on crash, `SIGKILL` and OOM. Previously,
+  suppression was global X11 state that outlived the process: if `xinput enable`
+  never ran (the remote never handed the cursor back, or mwb was killed), the
+  machine was left with no mouse and no keyboard, and nothing would restore
+  them. Recovering meant replugging hardware, which could crash Xorg and drop
+  the whole desktop session.
+- Devices are now classified by capability, mirroring udev's `input_id`, instead
+  of matching `razer|wooting` in the device name. Laptop touchpads, touchscreens
+  and graphics tablets are now isolated correctly; power and sleep buttons, lid
+  switches and audio-jack detection are deliberately left alone.
+- Isolation is now a single ioctl per device rather than one `xinput`
+  subprocess per device, which removes the ~1-2s compositor stall on return that
+  was previously documented as a known limitation.
+- `xinput` is no longer a runtime dependency.
+
+### Fixed
+- Inbound connections from the configured peer were rejected whenever it
+  connected from an address other than the one in `host`. A dual-stack Windows
+  peer opens the connection from an IPv6 link-local address, which no lookup of
+  its IPv4 can ever return, so every attempt was refused and the link flapped
+  (5 reconnects in 20 minutes on a normal session). The allowlist now refuses
+  globally routable sources — the internet still cannot reach the handshake —
+  and permits local-network sources to attempt it. The shared key remains the
+  authentication control; this widens who may attempt authentication, never who
+  passes it.
+- Isolation direction is now derived from cursor ownership inside a dedicated
+  mutex instead of being stated by each caller. Outbound switches run on
+  `pollCursorEdge` and returns run on the network handler, so a release
+  belonging to a finished switch-back could land after the grab for the next
+  switch-out and leave local input live while the cursor was on the remote
+  machine — a window of dual-cursor movement, observed live as
+  `grabbed … count=11 of=12` immediately followed by `released … count=12`.
+  Devices already in the target state are also skipped, since re-grabbing a
+  device this process already holds returns `EBUSY` and undercounted the result.
+- `Stop()` could hang forever in `wg.Wait()`. Input devices were opened blocking,
+  so their fds were not registered with Go's poller and `Close()` did not
+  interrupt a parked `read(2)`; a monitor goroutine for a silent device (power
+  button, audio-jack detect) never returned. Devices are now opened `O_NONBLOCK`.
+- The tracked device set was captured once at startup, so devices that appeared
+  later — wireless receivers re-enumerating on wake, a mouse plugged in
+  mid-session — were never isolated and leaked motion to the local display.
+  `grabInput()` now refreshes the set first, and devices that disappear are
+  dropped.
+- mwb's own `mwb-mouse` / `mwb-keyboard` uinput devices are never grabbed.
+  Grabbing them would swallow the events mwb injects, silently breaking remote
+  typing and clicking. Virtual devices belonging to other tools are skipped for
+  the same reason.
+
 ## [0.5.1] - 2026-07-02
 
 ### Changed

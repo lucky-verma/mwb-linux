@@ -7,83 +7,6 @@ import (
 	"time"
 )
 
-// --- parseXinputIDs ---
-
-func TestParseXinputIDs_SkipsFloatingSlaves(t *testing.T) {
-	// The single most important invariant: floating slaves must NEVER be included.
-	// Calling xinput disable/enable on a floating slave corrupts its attachment
-	// state and requires manual recovery (xinput reattach + xinput enable).
-	output := `
-⎡ Virtual core pointer                    	id=2	[master pointer  (3)]
-⎜   ↳ Wooting Wooting 60HE+ Mouse             	id=11	[slave  pointer  (2)]
-⎜   ↳ Wooting Wooting 60HE+ Consumer Control  	id=10	[slave  pointer  (2)]
-⎣ Virtual core keyboard                   	id=3	[master keyboard (2)]
-    ↳ Wooting Wooting 60HE+                   	id=8	[slave  keyboard (3)]
-    ↳ Wooting Wooting 60HE+ Consumer Control  	id=12	[slave  keyboard (3)]
-∼ Razer Razer DeathAdder V2 Pro           	id=26	[floating slave]
-∼ Razer Razer DeathAdder V2 Pro           	id=25	[floating slave]
-∼ RAZER Razer Mouse Dock                  	id=18	[floating slave]
-`
-	ids := parseXinputIDs(output)
-
-	// Must include all 4 attached devices
-	if len(ids) != 4 {
-		t.Errorf("expected 4 attached device IDs, got %d: %v", len(ids), ids)
-	}
-
-	// Must NOT include any floating slaves (26, 25, 18)
-	floating := map[int]bool{26: true, 25: true, 18: true}
-	for _, id := range ids {
-		if floating[id] {
-			t.Errorf("floating slave id=%d must not be included — causes attachment corruption", id)
-		}
-	}
-}
-
-func TestParseXinputIDs_AttachedDevicesIncluded(t *testing.T) {
-	output := `
-⎜   ↳ Wooting Wooting 60HE+ Mouse             	id=10	[slave  pointer  (2)]
-    ↳ Wooting Wooting 60HE+                   	id=8	[slave  keyboard (3)]
-    ↳ Power Button                            	id=6	[slave  keyboard (3)]
-`
-	ids := parseXinputIDs(output)
-	if len(ids) != 2 {
-		t.Errorf("expected 2 Wooting device IDs, got %d: %v", len(ids), ids)
-	}
-	has := func(want int) bool {
-		for _, id := range ids {
-			if id == want {
-				return true
-			}
-		}
-		return false
-	}
-	if !has(10) {
-		t.Error("expected id=10 (Wooting Mouse)")
-	}
-	if !has(8) {
-		t.Error("expected id=8 (Wooting keyboard)")
-	}
-}
-
-func TestParseXinputIDs_EmptyOutput(t *testing.T) {
-	if ids := parseXinputIDs(""); len(ids) != 0 {
-		t.Errorf("empty output should return no IDs, got %v", ids)
-	}
-}
-
-func TestParseXinputIDs_NoRazerWooting(t *testing.T) {
-	output := `
-⎡ Virtual core pointer                    	id=2	[master pointer  (3)]
-⎜   ↳ Logitech MX Master 3                    	id=9	[slave  pointer  (2)]
-⎣ Virtual core keyboard                   	id=3	[master keyboard (2)]
-    ↳ Generic USB Keyboard                    	id=6	[slave  keyboard (3)]
-`
-	if ids := parseXinputIDs(output); len(ids) != 0 {
-		t.Errorf("no Razer/Wooting devices, expected 0 IDs, got %v", ids)
-	}
-}
-
 // --- applyAcceleration ---
 
 func TestApplyAcceleration_ZeroDelta(t *testing.T) {
@@ -209,8 +132,8 @@ func TestAcceptsActivation_RightEdgeOnlyAcceptsRemoteLeftEdge(t *testing.T) {
 
 // --- SetActive mutex invariant ---
 
-// SetActive must NOT hold c.mu when calling enableXinput.
-// enableXinput acquires c.mu internally, so holding it in SetActive causes deadlock.
+// SetActive must NOT hold c.mu when calling applyIsolation.
+// applyIsolation acquires c.mu internally, so holding it in SetActive causes deadlock.
 // This test catches that regression by running SetActive with a timeout.
 func TestSetActive_NoDeadlockOnActivate(t *testing.T) {
 	c := &Capturer{
@@ -232,7 +155,7 @@ func TestSetActive_NoDeadlockOnActivate(t *testing.T) {
 	case <-done:
 		// pass — no deadlock
 	case <-time.After(3 * time.Second):
-		t.Fatal("SetActive deadlocked — check that enableXinput() is called AFTER c.mu.Unlock()")
+		t.Fatal("SetActive deadlocked — check that applyIsolation() is called AFTER c.mu.Unlock()")
 	}
 }
 
@@ -316,25 +239,5 @@ func TestCanSwitchGate_RequiresMoveAwayFromEdge(t *testing.T) {
 
 	if !armed {
 		t.Error("canSwitch should arm when cursor moves 100px away from edge")
-	}
-}
-
-// --- disabledXinputIDs cache ---
-
-func TestDisabledXinputIDsCache_ClearedOnEnable(t *testing.T) {
-	c := &Capturer{
-		stopCh:            make(chan struct{}),
-		disabledXinputIDs: []int{8, 9, 10}, // simulating previously disabled IDs
-	}
-
-	// After enableXinput, cache must be cleared
-	c.enableXinput()
-
-	c.mu.Lock()
-	remaining := len(c.disabledXinputIDs)
-	c.mu.Unlock()
-
-	if remaining != 0 {
-		t.Errorf("disabledXinputIDs should be cleared after enableXinput, got %d entries", remaining)
 	}
 }
