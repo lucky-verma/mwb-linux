@@ -18,9 +18,53 @@ import (
 	"github.com/lucky-verma/mwb-linux/internal/config"
 	"github.com/lucky-verma/mwb-linux/internal/input"
 	"github.com/lucky-verma/mwb-linux/internal/network"
+	"github.com/lucky-verma/mwb-linux/internal/selfupdate"
 )
 
+// version is stamped at release time via -ldflags "-X main.version=...".
+// Builds made outside the release pipeline report "dev".
+var version = "dev"
+
+// runSubcommand handles the verb form (`mwb update`, `mwb version`) and reports
+// whether it consumed the invocation. Subcommands are dispatched before
+// flag.Parse so they can own their own flag set.
+func runSubcommand() bool {
+	if len(os.Args) < 2 {
+		return false
+	}
+	switch os.Args[1] {
+	case "version", "--version", "-version":
+		fmt.Println("mwb", version)
+		return true
+
+	case "update":
+		fs := flag.NewFlagSet("update", flag.ExitOnError)
+		checkOnly := fs.Bool("check", false, "report whether an update exists without installing it")
+		force := fs.Bool("force", false, "reinstall even when already up to date")
+		_ = fs.Parse(os.Args[2:])
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		err := selfupdate.Run(ctx, selfupdate.Options{
+			CurrentVersion: version,
+			CheckOnly:      *checkOnly,
+			Force:          *force,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "update failed:", err)
+			os.Exit(1)
+		}
+		return true
+	}
+	return false
+}
+
 func main() {
+	if runSubcommand() {
+		return
+	}
+
 	configPath := flag.String("config", "", "path to config.toml")
 	debug := flag.Bool("debug", false, "enable debug logging")
 	edgeSide := flag.String("edge", "", "screen edge to switch: left or right (overrides config)")

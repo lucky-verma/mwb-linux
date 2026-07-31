@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `mwb update` downloads and installs the latest GitHub release, verifying it
+  against the SHA-256 in that release's `checksums.txt` and replacing the binary
+  atomically. `--check` reports availability without installing; `--force`
+  reinstalls. Refuses to overwrite a dpkg-managed install, and explains the
+  `sudo` requirement instead of failing with a bare permission error.
+- `mwb version` prints the installed version. The release pipeline already
+  passed `-X main.version`, but no such variable existed, so the flag was
+  silently doing nothing and every build was unversioned.
+
+### Changed
+- **Device isolation now uses `EVIOCGRAB` instead of `xinput disable`.** The
+  grab is owned by the file descriptor, so the kernel restores local input when
+  mwb's descriptors close — including on crash, `SIGKILL` and OOM. Previously,
+  suppression was global X11 state that outlived the process: if `xinput enable`
+  never ran (the remote never handed the cursor back, or mwb was killed), the
+  machine was left with no mouse and no keyboard, and nothing would restore
+  them. Recovering meant replugging hardware, which could crash Xorg and drop
+  the whole desktop session.
+- Devices are now classified by capability, mirroring udev's `input_id`, instead
+  of matching `razer|wooting` in the device name. Laptop touchpads, touchscreens
+  and graphics tablets are now isolated correctly; power and sleep buttons, lid
+  switches and audio-jack detection are deliberately left alone.
+- Isolation is now a single ioctl per device rather than one `xinput`
+  subprocess per device, which removes the ~1-2s compositor stall on return that
+  was previously documented as a known limitation.
+- `xinput` is no longer a runtime dependency.
+
+### Fixed
+- `Stop()` could hang forever in `wg.Wait()`. Input devices were opened blocking,
+  so their fds were not registered with Go's poller and `Close()` did not
+  interrupt a parked `read(2)`; a monitor goroutine for a silent device (power
+  button, audio-jack detect) never returned. Devices are now opened `O_NONBLOCK`.
+- The tracked device set was captured once at startup, so devices that appeared
+  later — wireless receivers re-enumerating on wake, a mouse plugged in
+  mid-session — were never isolated and leaked motion to the local display.
+  `grabInput()` now refreshes the set first, and devices that disappear are
+  dropped.
+- mwb's own `mwb-mouse` / `mwb-keyboard` uinput devices are never grabbed.
+  Grabbing them would swallow the events mwb injects, silently breaking remote
+  typing and clicking. Virtual devices belonging to other tools are skipped for
+  the same reason.
+
 ## [0.5.1] - 2026-07-02
 
 ### Changed

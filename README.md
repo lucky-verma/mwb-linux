@@ -89,7 +89,7 @@ chmod +x mwb-linux-amd64
 sudo mv mwb-linux-amd64 /usr/local/bin/mwb
 
 # Install dependencies
-sudo apt install xdotool xinput xclip
+sudo apt install xdotool xclip
 
 # Setup permissions
 sudo bash -c 'modprobe uinput && echo uinput > /etc/modules-load.d/uinput.conf'
@@ -118,7 +118,7 @@ manually when you explicitly want Linux → Windows control.
 
 It does not set up system dependencies. If this is a fresh machine, run the
 dependency and permission steps from [From Binary](#from-binary) first
-(`xdotool`/`xinput`/`xclip`, the `uinput` module, the udev rule, and the
+(`xdotool`/`xclip`, the `uinput` module, the udev rule, and the
 `input` group).
 
 > **Note:** Log out and back in after installation for group changes to take effect.
@@ -127,6 +127,29 @@ dependency and permission steps from [From Binary](#from-binary) first
 > system service that runs `/usr/local/bin/mwb`. `make install` installs a
 > per-user service that runs `~/go/bin/mwb`. If you switch methods, stop and
 > disable the old service first so you aren't running a stale binary.
+
+## Updating
+
+```bash
+mwb update --check   # see what's available
+mwb update           # download, verify and install
+```
+
+`mwb update` fetches the release artifact for your architecture, verifies it
+against the SHA-256 published in that release's `checksums.txt`, and replaces
+the binary atomically — an interrupted update leaves either the old binary or
+the new one, never a broken one. It refuses to install anything whose checksum
+does not match, and only ever downloads from GitHub.
+
+If mwb was installed from the `.deb`, `mwb update` will not overwrite it behind
+dpkg's back; it prints the `apt` command to use instead. If the binary lives
+somewhere only root can write, it tells you to re-run with `sudo`.
+
+The running service keeps using the old binary until it is restarted:
+
+```bash
+systemctl --user restart mwb.service
+```
 
 ## Quick Start
 
@@ -169,7 +192,7 @@ MWB Linux implements the full Mouse Without Borders protocol:
 3. **Heartbeats** — Proactive keepalive every 5s prevents Windows from dropping the connection
 4. **Edge detection** — 10ms cursor polling detects screen edges, instant switching with bounce prevention
 5. **Input forwarding** — Mouse (absolute coords) and keyboard (VK codes) sent as MWB packets
-6. **Device isolation** — `xinput disable/enable` prevents dual cursor movement during remote control
+6. **Device isolation** — exclusive `EVIOCGRAB` kernel grabs on local keyboards and pointers prevent dual cursor movement during remote control. The grab is owned by the file descriptor, so the kernel restores local input automatically if mwb exits, crashes or is killed
 7. **Clipboard** — Bidirectional text/image sync via compressed clipboard packets
 
 For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -220,6 +243,16 @@ keep the client on a trusted network segment.
 > tightens an existing config to `0600` on startup so other local accounts can't
 > read the key. Use a long, random key — `mwb` logs a warning if the configured
 > key is very short.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `mwb` | Run the client (default when no command is given) |
+| `mwb version` | Print the installed version |
+| `mwb update` | Download and install the latest release |
+| `mwb update --check` | Report whether an update exists, without installing |
+| `mwb update --force` | Reinstall the latest release even if already current |
 
 ### CLI Flags
 
@@ -285,7 +318,7 @@ control back to Ubuntu.
 ```
 cmd/mwb/              CLI entry point
 internal/
-  capture/            Edge detection, evdev capture, xinput device isolation
+  capture/            Edge detection, evdev capture, EVIOCGRAB device isolation
   clipboard/          Bidirectional clipboard sync (text + images)
   config/             TOML configuration
   input/              Virtual mouse/keyboard via uinput
@@ -302,9 +335,13 @@ scripts/
 - **Keyboard on Windows lock screen** — Keyboard input may not work on the Windows lock screen (Winlogon desktop security restriction)
 - **Middle mouse button auto-scroll** — Middle-click auto-scroll (scroll lock mode) does not work in browsers; normal middle-click works
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
-- **Bidirectional mode requires X11** — Edge detection and device isolation use `xdotool`/`xinput`. Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
+- **Bidirectional mode requires X11** — Edge detection uses `xdotool`. (Device isolation itself is display-server agnostic: `EVIOCGRAB` works identically on X11, Wayland and the console.) Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
 - **Keyboard layout metadata** — PowerToys MWB keyboard packets carry Windows virtual-key codes and flags, but not hardware scan codes or Unicode text. MWB Linux uses `keyboard_layout` profiles for common layouts; unsupported profiles fall back to the original US-compatible mapping. Fully zero-config global layout support requires sender-side scan code or Unicode metadata.
-- **Brief screen stall on return with many input devices** — Device isolation re-enables every matched device via `xinput` when control returns to Linux. On setups with many input devices (e.g. several gaming peripherals exposing 15+ `xinput` sub-devices) the compositor can stall for ~1-2s on return (the cursor keeps moving, the screen briefly freezes). An EVIOCGRAB-based isolation was tried to avoid this but introduced a worse cursor regression and was reverted; a proper fix (EVIOCGRAB done right, or libei) is tracked for a future release.
+- **Special-function keys stay local while remote** — Media, brightness and
+  similar hardware keys are deliberately not grabbed, so they act on the Linux
+  machine even while the cursor is on the remote. Power and sleep buttons are
+  likewise never grabbed, which keeps the physical power button available as a
+  last-resort recovery path.
 - **Cursor speed / drift** — Remote cursor movement scales raw evdev deltas by `accel_multiplier` (default 2×); lower it if the Windows cursor feels too fast (the Windows side adds no acceleration of its own). Tracking is open-loop, so the virtual cursor may still drift from the actual position over long sessions.
 
 ## Contributing
