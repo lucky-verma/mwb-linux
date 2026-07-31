@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-31
+
 ### Added
 - **File copy between machines, both directions.** Copy a file on Windows and it
   lands in `~/Downloads/mwb`; copy one on Linux and it goes to the peer. File
