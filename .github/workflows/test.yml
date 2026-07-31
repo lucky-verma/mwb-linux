@@ -28,6 +28,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Releases build linux/arm64, but nothing else does, so an arch-specific
+      # break surfaces only after tagging. The evdev grab path uses raw
+      # syscall numbers, which is exactly the shape that breaks per-arch.
+      - name: Cross compile
+        run: GOOS=linux GOARCH=arm64 go build ./...
+
   lint:
     runs-on: ubuntu-latest
     steps:
