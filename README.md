@@ -98,6 +98,17 @@ sudo udevadm control --reload-rules
 sudo usermod -aG input $USER
 ```
 
+### With Go
+
+```bash
+go install github.com/lucky-verma/mwb-linux/cmd/mwb@latest
+```
+
+Puts `mwb` in `$(go env GOPATH)/bin`. You still need the system dependencies and
+permissions from [From Binary](#from-binary): `xdotool`/`xclip`, the `uinput`
+module, the udev rule, and membership of the `input` group. This build reports
+`dev` for `mwb version`, since the release ldflags are not applied.
+
 ### From Source
 
 ```bash
@@ -194,6 +205,7 @@ MWB Linux implements the full Mouse Without Borders protocol:
 5. **Input forwarding** — Mouse (absolute coords) and keyboard (VK codes) sent as MWB packets
 6. **Device isolation** — exclusive `EVIOCGRAB` kernel grabs on local keyboards and pointers prevent dual cursor movement during remote control. The grab is owned by the file descriptor, so the kernel restores local input automatically if mwb exits, crashes or is killed
 7. **Clipboard** — Bidirectional text/image sync via compressed clipboard packets
+8. **File copy** — Copy a file on one machine, paste on the other. Files travel over a second connection to the same port, not the clipboard packet stream, matching how MWB does it
 
 For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -242,6 +254,9 @@ keep the client on a trusted network segment.
 | `clipboard` | true | Clipboard sync: set `false` to disable text/image sharing |
 | `accel_multiplier` | 2.0 | Cursor speed when controlling Windows. Lower it (e.g. `1.0`, `0.5`) if the Windows cursor feels too fast |
 | `inbound_multiplier` | 1.0 | Cursor speed when Windows controls Linux. `1.0` mirrors Windows exactly; raise it for faster inbound movement |
+| `file_transfer` | true | Enable the MWB file copy channel |
+| `file_dir` | ~/Downloads/mwb | Where received files are written |
+| `max_file_size` | 104857600 | Per-transfer cap in bytes. The default matches MWB's own 100 MB limit; a stock Windows peer neither sends nor accepts more |
 | `keyboard_layout` | auto | Inbound Windows-to-Linux keyboard mapping. `auto` detects the local Linux layout when possible; supported profiles include `us`, `de`, `fr`, `be`, `es`, `it`, `gb`, `pt`, `no`/`dk`/`se`/`fi`, `ch`, and `nl` |
 
 > **Config file security:** `config.toml` stores the security key in plaintext.
@@ -343,6 +358,11 @@ scripts/
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
 - **Bidirectional mode requires X11** — Edge detection uses `xdotool`. (Device isolation itself is display-server agnostic: `EVIOCGRAB` works identically on X11, Wayland and the console.) Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
 - **Keyboard layout metadata** — PowerToys MWB keyboard packets carry Windows virtual-key codes and flags, but not hardware scan codes or Unicode text. MWB Linux uses `keyboard_layout` profiles for common layouts; unsupported profiles fall back to the original US-compatible mapping. Fully zero-config global layout support requires sender-side scan code or Unicode metadata.
+- **File copy is one file at a time** — Matching MWB itself, folders and
+  multi-file selections are not transferred; zip them first. The 100 MB default
+  cap is MWB's own limit, not ours. Drag-and-drop between machines is not
+  supported: that flow needs Explorer `DragEnter` and helper windows, so it is
+  Windows-only by construction.
 - **Special-function keys stay local while remote** — Media, brightness and
   similar hardware keys are deliberately not grabbed, so they act on the Linux
   machine even while the cursor is on the remote. Power and sleep buttons are

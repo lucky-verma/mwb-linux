@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/BurntSushi/toml"
 )
@@ -18,6 +19,16 @@ type Config struct {
 	RemoteHeight int    `toml:"remote_height"`
 	Edge         string `toml:"edge"`
 	Clipboard    *bool  `toml:"clipboard"` // nil = unset, treated as enabled
+
+	// FileTransfer controls the MWB file copy channel. nil = enabled.
+	FileTransfer *bool `toml:"file_transfer"`
+
+	// FileDir is where received files are written. Empty = ~/Downloads/mwb.
+	FileDir string `toml:"file_dir"`
+
+	// MaxFileSize caps a single transfer in bytes. 0 = MWB's own 100 MB limit,
+	// which a stock Windows peer neither exceeds nor accepts.
+	MaxFileSize int64 `toml:"max_file_size"`
 
 	// KeyboardLayout controls inbound Windows->Linux keyboard mapping. "auto"
 	// detects the local Linux layout when possible; unsupported layouts fall back
@@ -114,4 +125,23 @@ func (c *Config) MessagePort() int {
 // clipboard key keeps it enabled, preserving the prior default behavior.
 func (c *Config) ClipboardEnabled() bool {
 	return c.Clipboard == nil || *c.Clipboard
+}
+
+// FileTransferEnabled reports whether the file copy channel should run.
+// An absent setting is treated as enabled, matching clipboard.
+func (c *Config) FileTransferEnabled() bool {
+	return c.FileTransfer == nil || *c.FileTransfer
+}
+
+// FileDirectory resolves where received files are written, defaulting to
+// ~/Downloads/mwb so arrivals land somewhere the user already looks.
+func (c *Config) FileDirectory() string {
+	if c.FileDir != "" {
+		return os.ExpandEnv(c.FileDir)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "mwb")
+	}
+	return filepath.Join(home, "Downloads", "mwb")
 }

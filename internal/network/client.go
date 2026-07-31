@@ -57,9 +57,12 @@ func getCachedKeyMaterial(securityKey string) ([]byte, []byte, uint32) {
 	return cachedAESKey, cachedIV, cachedMagic
 }
 
-// setupConn configures TCP options, creates crypto streams, exchanges IV, and
-// performs a deadline-bounded handshake on an established TCP connection.
-func setupConn(raw net.Conn, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
+// newSecureStream configures TCP options, creates the AES-CBC streams and
+// performs the IV block exchange. It stops before the handshake, because the
+// file-transfer channel shares this port and this prefix but continues
+// differently: it sends a Clipboard/ClipboardPush packet where the control
+// channel sends Handshake.
+func newSecureStream(raw net.Conn, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
 	if timeout <= 0 {
 		timeout = handshakeTimeout
 	}
@@ -115,8 +118,27 @@ func setupConn(raw net.Conn, securityKey, machineName string, timeout time.Durat
 		LocalName: machineName,
 	}
 
-	if err := c.doHandshake(machineName); err != nil {
-		return nil, fmt.Errorf("handshake: %w", err)
+	return c, nil
+}
+
+// setupConn establishes the control connection: secure stream, then handshake.
+// Outbound connections always take this path.
+func setupConn(raw net.Conn, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
+	c, err := newSecureStream(raw, securityKey, machineName, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.finishControlSetup(machineName, nil); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// finishControlSetup completes a control connection once the secure stream
+// exists. first is a packet already read from the stream, or nil.
+func (c *Conn) finishControlSetup(machineName string, first *protocol.Packet) error {
+	if err := c.doHandshake(machineName, first); err != nil {
+		return fmt.Errorf("handshake: %w", err)
 	}
 
 	// Send initial heartbeat to trigger device registration on the server
@@ -127,13 +149,13 @@ func setupConn(raw net.Conn, securityKey, machineName string, timeout time.Durat
 	}
 	hb.SetMachineName(machineName)
 	if err := c.SendPacket(hb); err != nil {
-		return nil, fmt.Errorf("send heartbeat: %w", err)
+		return fmt.Errorf("send heartbeat: %w", err)
 	}
-	if err := raw.SetDeadline(time.Time{}); err != nil {
-		return nil, fmt.Errorf("clear handshake deadline: %w", err)
+	if err := c.raw.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear handshake deadline: %w", err)
 	}
 
-	return c, nil
+	return nil
 }
 
 // Connect establishes a TCP connection, performs IV exchange and handshake.
@@ -289,14 +311,24 @@ func isLocalNetwork(ip net.IP) bool {
 	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
+// InboundFile handles a peer-initiated file transfer. MWB opens a second
+// connection to this same port for file copies, identical to the control
+// channel up to the IV exchange and distinguished only by the first packet it
+// sends. The stream is positioned at the file header when this is called, and
+// the connection is closed once it returns.
+//
+// A nil handler rejects file connections, which is the behaviour before file
+// transfer existed.
+type InboundFile func(c *Conn, push bool)
+
 // ListenAndAccept starts a TCP server on the given port and sends accepted
-// connections (after handshake) to the returned channel. This allows Windows
-// MWB to connect TO us, which is faster after lock/reconnect cycles.
+// control connections (after handshake) to the returned channel. This allows
+// Windows MWB to connect TO us, which is faster after lock/reconnect cycles.
 //
 // allowedHost restricts inbound connections to the configured peer. Hostnames
 // are resolved once at listener startup; resolution failure disables inbound
 // connections while leaving the outbound retry path available.
-func ListenAndAccept(port int, securityKey, machineName, allowedHost string, stop chan struct{}) (chan *Conn, error) {
+func ListenAndAccept(port int, securityKey, machineName, allowedHost string, onFile InboundFile, stop chan struct{}) (chan *Conn, error) {
 	connCh := make(chan *Conn, 1)
 	allowedIPs, resolveErr := resolveAllowedPeer(allowedHost)
 	if resolveErr != nil {
@@ -368,8 +400,39 @@ func ListenAndAccept(port int, securityKey, machineName, allowedHost string, sto
 				defer func() { <-pending }()
 
 				slog.Info("incoming connection", "remote", raw.RemoteAddr())
-				conn, err := setupConn(raw, securityKey, machineName, handshakeTimeout)
+
+				conn, err := newSecureStream(raw, securityKey, machineName, handshakeTimeout)
 				if err != nil {
+					slog.Error("incoming stream setup failed", "remote", raw.RemoteAddr(), "err", err)
+					_ = raw.Close()
+					return
+				}
+
+				// The first packet decides what this connection is. It must be
+				// read before anything is sent: a file-sending peer reads our
+				// first packet as its header and aborts on an unexpected type.
+				first, err := conn.RecvPacket()
+				if err != nil {
+					slog.Error("incoming first packet failed", "remote", raw.RemoteAddr(), "err", err)
+					_ = raw.Close()
+					return
+				}
+
+				if first.Type == protocol.Clipboard || first.Type == protocol.ClipboardPush {
+					if onFile == nil {
+						slog.Debug("file transfer offered but no handler registered", "remote", raw.RemoteAddr())
+						_ = raw.Close()
+						return
+					}
+					if err := raw.SetDeadline(time.Time{}); err != nil {
+						slog.Warn("clear file transfer deadline", "err", err)
+					}
+					onFile(conn, first.Type == protocol.ClipboardPush)
+					_ = raw.Close()
+					return
+				}
+
+				if err := conn.finishControlSetup(machineName, first); err != nil {
 					slog.Error("incoming handshake failed", "remote", raw.RemoteAddr(), "err", err)
 					_ = raw.Close()
 					return
@@ -388,7 +451,7 @@ func ListenAndAccept(port int, securityKey, machineName, allowedHost string, sto
 	return connCh, nil
 }
 
-func (c *Conn) doHandshake(machineName string) error {
+func (c *Conn) doHandshake(machineName string, first *protocol.Packet) error {
 	hs := &protocol.Packet{
 		Type: protocol.Handshake,
 		ID:   1,
@@ -421,9 +484,13 @@ func (c *Conn) doHandshake(machineName string) error {
 	// Read packets until we get a valid HandshakeAck. setupConn applies the
 	// deadline for the full IV exchange and handshake, including writes.
 	for i := 0; i < 20; i++ {
-		pkt, err := c.RecvPacket()
-		if err != nil {
-			return fmt.Errorf("recv: %w", err)
+		pkt := first
+		first = nil
+		if pkt == nil {
+			var err error
+			if pkt, err = c.RecvPacket(); err != nil {
+				return fmt.Errorf("recv: %w", err)
+			}
 		}
 
 		if pkt.Type == protocol.Handshake {
@@ -460,6 +527,13 @@ func (c *Conn) doHandshake(machineName string) error {
 
 	return fmt.Errorf("no HandshakeAck received")
 }
+
+// Reader exposes the decrypted stream. The file-transfer channel reads its
+// header and body directly from here rather than as packets.
+func (c *Conn) Reader() io.Reader { return c.dec }
+
+// Writer exposes the encrypted stream for the same reason.
+func (c *Conn) Writer() io.Writer { return c.enc }
 
 // SendPacket marshals, stamps, and sends a packet with a 500ms write deadline
 // matching OG MWB's SendTimeout to prevent stuck writes from blocking.
@@ -516,4 +590,37 @@ func (c *Conn) Close() error {
 	}
 	_ = c.SendPacket(bye) // best-effort, don't block on failure
 	return c.raw.Close()
+}
+
+// DialFile opens a file-transfer connection to the peer.
+//
+// MWB uses the same port and the same IV exchange as the control channel, then
+// identifies the connection by sending a Clipboard packet where the control
+// channel sends Handshake. The returned Conn is positioned for the caller to
+// write the file header and body; the caller owns closing it.
+func DialFile(addr, securityKey, machineName string, machineID uint32, timeout time.Duration) (*Conn, error) {
+	raw, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("dial file channel: %w", err)
+	}
+
+	c, err := newSecureStream(raw, securityKey, machineName, timeout)
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+
+	hdr := &protocol.Packet{Type: protocol.Clipboard, Src: machineID}
+	hdr.SetMachineName(machineName)
+	if err := c.SendPacket(hdr); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("send file channel header: %w", err)
+	}
+
+	// The transfer itself is unbounded in time relative to a handshake.
+	if err := raw.SetDeadline(time.Time{}); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("clear file channel deadline: %w", err)
+	}
+	return c, nil
 }

@@ -28,3 +28,6 @@ Thumbs.db
 
 # local knowledge-graph artifacts
 graphify-out/
+
+# goreleaser build output
+dist/

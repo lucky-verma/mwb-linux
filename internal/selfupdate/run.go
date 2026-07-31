@@ -66,11 +66,14 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("resolve running binary: %w", err)
 	}
 	if pkg, managed := packageOwner(ctx, exePath); managed {
-		say("\n%s is managed by the %q package.\n", exePath, pkg)
-		say("Update it through apt instead, so dpkg stays in sync:\n\n")
-		say("    sudo apt install --only-upgrade %s\n\n", pkg)
-		say("Or download the .deb for %s from:\n    https://github.com/%s/releases/latest\n",
-			rel.Version, Repo)
+		// No APT repository publishes this project, so `apt install --only-upgrade`
+		// would report the package is already the newest version. Point at the
+		// release artifact, which is the only path that actually upgrades a
+		// dpkg-managed install.
+		say("\n%s is managed by the %q package, so it is not replaced here.\n", exePath, pkg)
+		say("Download the %s .deb and install it with dpkg, which keeps dpkg in sync:\n\n", rel.Version)
+		say("    https://github.com/%s/releases/latest\n", Repo)
+		say("    sudo dpkg -i %s_*.deb\n", pkg)
 		return nil
 	}
 
