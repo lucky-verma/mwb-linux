@@ -660,20 +660,6 @@ func getCursorPosition() (x, y int32, err error) {
 	return int32(ix), int32(iy), nil
 }
 
-// grabTargetFiles snapshots the keyboards and pointers currently tracked, so
-// the ioctls below run without holding c.mu.
-func (c *Capturer) grabTargetFiles() []*os.File {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	targets := make([]*os.File, 0, len(c.devices))
-	for _, d := range c.devices {
-		if d.grab {
-			targets = append(targets, d.file)
-		}
-	}
-	return targets
-}
-
 // applyIsolation brings the kernel grabs in line with who currently owns the
 // cursor: suppressed while the cursor is on the remote machine, live while it
 // is local.

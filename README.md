@@ -203,10 +203,16 @@ Mouse Without Borders lets a remote machine inject keyboard and mouse input into
 your Linux session, so treat it like remote control and run it only on networks
 and machines you trust.
 
-- **Trusted peer only.** As defense in depth, the client accepts inbound
-  connections only from the IP configured in `host` (or resolved from it once
-  at startup); other sources are rejected and logged. The outbound connection
-  is unchanged.
+- **Local networks only.** As defense in depth, the client refuses inbound
+  connections from globally routable addresses before they can consume any
+  handshake work; the internet cannot reach the handshake. Sources on a local
+  network (RFC1918/ULA private space or an IPv6 link-local address) are allowed
+  to attempt it, because the configured peer is a machine rather than an
+  address: a dual-stack Windows host connects from an IPv6 link-local address
+  that no lookup of its IPv4 will return, and DHCP renewal, a second NIC or a
+  VPN route all change the source address without changing the peer. This
+  widens who may *attempt* authentication, never who passes it. The outbound
+  connection is unchanged.
 - **Shared secret.** Use a long, random `key` and protect the config file.
   Anyone who obtains the key and can reach the configured host can impersonate
   an MWB peer.

@@ -35,6 +35,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `xinput` is no longer a runtime dependency.
 
 ### Fixed
+- Inbound connections from the configured peer were rejected whenever it
+  connected from an address other than the one in `host`. A dual-stack Windows
+  peer opens the connection from an IPv6 link-local address, which no lookup of
+  its IPv4 can ever return, so every attempt was refused and the link flapped
+  (5 reconnects in 20 minutes on a normal session). The allowlist now refuses
+  globally routable sources — the internet still cannot reach the handshake —
+  and permits local-network sources to attempt it. The shared key remains the
+  authentication control; this widens who may attempt authentication, never who
+  passes it.
 - Isolation direction is now derived from cursor ownership inside a dedicated
   mutex instead of being stated by each caller. Outbound switches run on
   `pollCursorEdge` and returns run on the network handler, so a release

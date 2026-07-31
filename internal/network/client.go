@@ -228,19 +228,34 @@ func resolveAllowedPeer(allowedHost string) ([]net.IP, error) {
 	return ips, nil
 }
 
-// isAllowedPeer reports whether addr belongs to the peer resolved from the
-// configured host. An empty allowlist rejects every connection (fail closed).
+// isAllowedPeer reports whether addr may attempt the handshake.
+//
+// Matching the configured host's resolved addresses is the fast path. Beyond
+// that, sources on a non-routable network are also allowed to try, because the
+// configured peer is a *machine*, not an address, and a machine's other
+// addresses cannot be derived from the one that was configured:
+//
+//	a dual-stack Windows host opens the connection from an IPv6 link-local
+//	address that no lookup of its IPv4 will ever return
+//	DHCP renewal, a second NIC, Wi-Fi/Ethernet failover and VPN routes all
+//	change the source address without changing the peer
+//
+// Requiring an exact address match therefore rejects the legitimate peer: a
+// host configured by its IPv4 address can never match the IPv6 link-local
+// address it actually connects from, so every inbound attempt is refused and
+// the link flaps between failed accepts and outbound retries.
+//
+// Globally routable sources are still refused before they can consume handshake
+// work, so the internet cannot reach the handshake. The shared key remains the
+// authentication control, exactly as before — this widens who may *attempt*
+// authentication, never who passes it.
 func isAllowedPeer(addr net.Addr, allowedIPs []net.IP) bool {
-	var remoteIP net.IP
-	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
-		remoteIP = tcpAddr.IP
-	} else {
-		host, _, err := net.SplitHostPort(addr.String())
-		if err != nil {
-			return false
-		}
-		remoteIP = net.ParseIP(host)
+	// Resolution failed: no configured peer is known, so fail closed.
+	if len(allowedIPs) == 0 {
+		return false
 	}
+
+	remoteIP := remoteIP(addr)
 	if remoteIP == nil {
 		return false
 	}
@@ -249,7 +264,29 @@ func isAllowedPeer(addr net.Addr, allowedIPs []net.IP) bool {
 			return true
 		}
 	}
-	return false
+	return isLocalNetwork(remoteIP)
+}
+
+// remoteIP extracts the IP from a net.Addr, tolerating both *net.TCPAddr and
+// the host:port string form.
+func remoteIP(addr net.Addr) net.IP {
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		return tcpAddr.IP
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
+}
+
+// isLocalNetwork reports whether ip is on a network that is not globally
+// routable — RFC1918/ULA private space, or an IPv6 link-local address.
+//
+// Loopback is deliberately excluded: the peer is another machine, so a
+// connection from this host is never the configured peer.
+func isLocalNetwork(ip net.IP) bool {
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // ListenAndAccept starts a TCP server on the given port and sends accepted
@@ -306,9 +343,9 @@ func ListenAndAccept(port int, securityKey, machineName, allowedHost string, sto
 				continue
 			}
 
-			// Reject any source that is not the configured peer before it can
-			// consume handshake work. The shared key remains the authentication
-			// control; the IP allowlist is defense in depth.
+			// Refuse globally routable sources before they can consume handshake
+			// work. The shared key remains the authentication control; this is
+			// defense in depth.
 			if !isAllowedPeer(raw.RemoteAddr(), allowedIPs) {
 				slog.Warn("rejected inbound connection from unexpected source",
 					"remote", raw.RemoteAddr(), "allowedHost", allowedHost)
