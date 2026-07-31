@@ -13,7 +13,7 @@ cd mwb-linux
 # https://go.dev/dl/
 
 # Install dev dependencies
-sudo apt install xdotool xinput xclip
+sudo apt install xdotool xclip
 
 # Build
 make build
@@ -36,7 +36,7 @@ make check
 4. Run `make check` to ensure everything passes
 5. Commit with a descriptive message
 6. Push and open a Pull Request — the PR template will guide you through the
-   required checklist (build, race detector, lint, and manual xinput safety checks)
+   required checklist (build, race detector, lint, and manual input-isolation safety checks)
 
 > **Before touching `internal/capture/`**: read the **Critical Invariants**
 > section in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Violations of the
@@ -56,9 +56,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed protocol documenta
 
 ## Areas for Contribution
 
-- **Wayland support** — Replace xdotool/xinput with compositor extensions (major rewrite of capture subsystem)
+- **Wayland support** — Replace xdotool with compositor extensions (major rewrite of capture subsystem). Device isolation is already display-server agnostic.
 - **XInput2 events** — Replace 100 forks/sec xdotool polling with `XI_RawMotion` event subscription
-- **EVIOCGRAB** — Replace xinput name-matching with kernel-level exclusive grab (works for all brands)
 - **Virtual cursor correction** — Wire `UpdateRemoteScreen()` to incoming absolute coords to fix drift
 - **Multi-monitor** — Proper screen geometry for `xrandr` multi-output setups
 - **GUI** — System tray app with GTK

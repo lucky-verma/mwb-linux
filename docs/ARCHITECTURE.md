@@ -11,7 +11,7 @@ flowchart LR
     subgraph LX["🐧 <b>Linux PC</b>"]
         direction TB
         DEV["🖱️ Mouse · ⌨️ Keyboard<br/>(evdev)"]
-        CAP["<b>capture</b><br/>edge detect · xinput isolation"]
+        CAP["<b>capture</b><br/>edge detect · evdev grab isolation"]
         NET["<b>protocol · network</b><br/>AES-256-CBC"]
         UIN["<b>uinput</b><br/>virtual mouse + keyboard"]
         DEV --> CAP --> NET
@@ -79,7 +79,7 @@ sequenceDiagram
     rect rgb(236, 244, 255)
         note over L,W: Linux → Windows
         L->>L: edge poll (10ms) → cursor hits edge
-        L->>L: xinput disable (isolate local device)
+        L->>L: EVIOCGRAB local keyboards/pointers
         L->>W: Mouse(123) burst → entry position (proportional Y, just inside edge)
         W->>W: Receiver self-reclaim → SendMouse() → Win32 SendInput
         L->>W: evdev deltas → absolute Mouse(123) (0–65535)
@@ -88,7 +88,7 @@ sequenceDiagram
     rect rgb(255, 248, 235)
         note over L,W: return to Linux
         L->>L: virtual cursor reaches far edge (remoteWidth/Height)
-        L->>L: xinput enable + recenter cursor (xdotool)
+        L->>L: recenter cursor (xdotool), then release grabs
         note over L: active=true, switchSent cleared → local mouse controls Linux
     end
 ```
@@ -195,8 +195,28 @@ remote entry offset so the initial handoff cannot be mistaken for a return.
 This protects against rotated Windows matrix layouts and wrap behavior pulling
 control back from the remote machine's far edge.
 
-### 7. xinput for Device Isolation
-When controlling the remote, `xinput disable` prevents the local device from moving the Ubuntu cursor. `xinput enable` restores it when returning. This is more reliable than EVIOCGRAB which had issues with device restoration.
+### 7. EVIOCGRAB for Device Isolation
+While the cursor is on the remote machine, mwb takes an exclusive kernel grab
+(`EVIOCGRAB`) on every local keyboard and pointer, so their events reach only
+mwb and never the display server.
+
+The grab is owned by the **file descriptor**. The kernel drops it when the fd
+closes — on clean exit, and equally on crash, `SIGKILL` or OOM. Restoring local
+input is therefore structural rather than procedural: there is no release call
+that can be missed.
+
+This replaced `xinput disable`, which was global X11 state that outlived the
+process. When a matching `xinput enable` never ran — remote never handed the
+cursor back, mwb was killed, the connection wedged — the machine was left with
+no mouse and no keyboard, and nothing in the system would restore them.
+
+An earlier EVIOCGRAB attempt was reverted in `d407e88`. It kept `xinput` as a
+fallback, so X device-hierarchy churn remained, the compositor still stalled,
+and the cursor warp on return took ~750ms with the grab held across it. Removing
+`xinput` entirely eliminates the churn; the warp measures 3-4ms, so holding the
+grab across it is imperceptible. The synchronous warp-then-release ordering from
+the original xinput path is preserved deliberately — releasing first and warping
+asynchronously is what produced the rubberband regression in `22f85ce`.
 
 ### 8. Timing and Debouncing
 - **Edge polling**: 10ms ticker (`pollCursorEdge`, `capture_linux.go`)
@@ -227,7 +247,8 @@ internal/
     reverse_keymap_linux.go   Linux evdev → Windows VK mapping
     buttons.go                BTN_LEFT/RIGHT/MIDDLE constants
   capture/
-    capture_linux.go          Edge detection, evdev monitoring, xinput grab, remote cursor tracking
+    capture_linux.go          Edge detection, evdev monitoring, device tracking, remote cursor tracking
+    grab_linux.go             EVIOCGRAB isolation + udev-style device classification
     screen_linux.go           Screen resolution via xrandr
 ```
 
@@ -265,7 +286,6 @@ mwb -bidi -edge left -debug
 ### Linux Side
 - `/dev/uinput` accessible (user in `input` group)
 - `xdotool` installed (for cursor position polling)
-- `xinput` installed (for device isolation)
 - `xrandr` installed (for screen detection)
 - Configure the udev/input-group access from the installer; avoid `sudo mwb`
   for normal use because it reads root's config and can miss the user's
@@ -276,18 +296,19 @@ mwb -bidi -edge left -debug
 These are non-obvious rules that **must not be broken** by refactoring.
 Each has caused a production bug when violated.
 
-### Mutex: never hold `c.mu` when calling `enableXinput()` / `disableXinput()`
+### Mutex: never hold `c.mu` when calling `grabInput()` / `releaseInput()`
 
 Both methods acquire `c.mu` internally. Calling them while already holding `c.mu`
 causes an immediate deadlock — Go's `sync.Mutex` is not reentrant. `SetActive` and
 `handleRel` release `c.mu` explicitly before calling these methods.
+**Test:** `TestSetActive_NoDeadlockOnActivate`.
 
 ```go
 // WRONG — deadlock
 func (c *Capturer) SetActive(active bool) {
     c.mu.Lock()
     defer c.mu.Unlock()
-    c.enableXinput() // tries to acquire c.mu → deadlock
+    c.releaseInput() // tries to acquire c.mu → deadlock
 }
 
 // CORRECT
@@ -295,25 +316,50 @@ func (c *Capturer) SetActive(active bool) {
     c.mu.Lock()
     // ... update state ...
     c.mu.Unlock()   // release first
-    c.enableXinput() // then call
+    c.releaseInput() // then call
 }
 ```
 
-### xinput: NEVER call `enable`/`disable` on `[floating slave]` devices
+### Never grab virtual (uinput) devices
 
-Floating slaves are already detached from the X11 master pointer/keyboard.
-Calling `xinput enable` or `xinput disable` on them corrupts their state,
-and they require manual recovery (`xinput reattach` + `xinput enable`).
+mwb replays remote input through its own `mwb-mouse` / `mwb-keyboard` uinput
+devices. Grabbing those would swallow the very events mwb is injecting, so
+remote typing and clicking would stop working with no error anywhere. The same
+reasoning protects other users' tools (input-remapper, ydotool, other KVM
+software), whose output devices would break identically.
 
-`parseXinputIDs` skips any line containing `[floating slave]`. This filter
-must be preserved. **Test:** `TestParseXinputIDs_SkipsFloatingSlaves`.
+`isVirtualDevice` resolves the sysfs link and skips anything under
+`/sys/devices/virtual/`. It fails **closed** — an unresolvable node is treated
+as virtual and left alone. **Test:** `TestIsGrabTarget_NeverGrabsVirtualDevices`.
 
-### xinput: `enableXinput()` only when `disabledXinputIDs` is non-empty (or as cleanup)
+### Classify by capability, never by vendor name
 
-Calling `enableXinput()` unconditionally at startup or on reconnect will run
-`xinput enable` on attached devices. While this is idempotent for enabled
-devices, it must never be called on floating devices (see above). `New()` does
-not call `enableXinput()` — `Stop()` handles cleanup for the cycle.
+`isGrabTarget` mirrors udev's `input_id` builtin and reads only capability
+bitmasks: relative pointers (`REL_X`+`REL_Y`+`BTN_MOUSE`), absolute pointers
+(`ABS_X`+`ABS_Y` plus a touch or tool button, which excludes gamepads and
+accelerometers), and full keyboards (all of key codes 1-31).
+
+Name matching (the old `razer|wooting` filter) only worked on one person's
+hardware and silently missed laptop touchpads. Power and sleep buttons, lid
+switches and audio-jack detection must stay ungrabbed — taking the power button
+removes the last-resort recovery path.
+**Test:** `TestIsGrabTarget_NeverGrabsButtonsOrSwitches`.
+
+### Input devices must be opened with `O_NONBLOCK`
+
+Opened blocking, an evdev fd is not registered with Go's poller, so `Close()`
+does not interrupt a parked `read(2)`. `monitorDevice` then only returns when
+that device next emits an event — which silent nodes (power buttons, audio-jack
+detect) never do — and `Stop()` waits forever in `wg.Wait()`.
+**Test:** `TestStop_DrainsEvenWhenDevicesAreSilent`.
+
+### The tracked device set must be refreshed, not captured once
+
+Wireless receivers re-enumerate on wake, hubs re-attach, users plug in a second
+mouse mid-session. A set captured once at startup goes stale, and an untracked
+device is never grabbed — its motion leaks straight to the local display while
+the cursor is on the remote machine. `grabInput()` calls `refreshDevices()`
+first. **Test:** `TestRefreshDevices_AdoptsDevicesPresentOnDisk`.
 
 ### Cursor position: both `OnActivated` and `OnReclaimed` must move cursor away from edge
 
@@ -333,10 +379,14 @@ bring control back to Ubuntu.
 
 ### `Stop()` must drain goroutines before returning
 
-`monitorDevice` goroutines block on `f.Read()` indefinitely. Without closing
-the device file descriptors and waiting on the `WaitGroup`, goroutines accumulate
-across reconnect cycles (35 devices × N reconnects). `Stop()` closes all stored
-`deviceFiles` and calls `c.wg.Wait()`.
+`monitorDevice` goroutines park in `f.Read()`. Without closing the device file
+descriptors and waiting on the `WaitGroup`, goroutines accumulate across
+reconnect cycles (35 devices × N reconnects). `Stop()` closes every tracked
+device and calls `c.wg.Wait()`.
+
+Closing only works because the descriptors are opened `O_NONBLOCK` — see the
+`O_NONBLOCK` invariant above. Closing also releases any `EVIOCGRAB` the kernel
+still holds, which is why `Stop()` needs no separate release step.
 
 ### `SendPacket` must hold `sendMu` for the full `enc.Write` call
 
@@ -351,8 +401,7 @@ all writes.
 
 - [ ] File drag-and-drop
 - [ ] Multi-monitor support
-- [ ] Wayland native support (replace xdotool/xinput with compositor protocol)
+- [ ] Wayland native support (replace xdotool with compositor protocol)
 - [ ] Replace xdotool polling with XInput2 RawMotion events (100 forks/sec → 0)
-- [ ] Replace xinput name-matching with EVIOCGRAB (vendor-agnostic isolation)
 - [ ] Virtual cursor drift correction (wire UpdateRemoteScreen to incoming abs coords)
 - [ ] Smoother cursor transition animations

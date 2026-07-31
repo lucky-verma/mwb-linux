@@ -51,7 +51,6 @@ nfpms:
     bindir: /usr/local/bin
     dependencies:
       - xdotool
-      - xinput
       - xclip
       - x11-xserver-utils
     contents:

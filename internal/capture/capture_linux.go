@@ -12,9 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/lucky-verma/mwb-linux/internal/input"
@@ -69,34 +69,39 @@ type ScreenInfo struct {
 
 // Capturer monitors input and forwards events to the remote MWB host.
 type Capturer struct {
-	conn              *network.Conn
-	screen            ScreenInfo
-	active            bool   // true = cursor is on this machine
-	edgeSide          string // "left" or "right"
-	mu                sync.Mutex
-	stopCh            chan struct{}
-	wg                sync.WaitGroup // tracks all goroutines for clean Stop()
-	deviceFiles       []*os.File     // open /dev/input/event* fds — closed on Stop() to unblock f.Read
-	lastSwitch        time.Time      // debounce outgoing switches
-	switchSent        time.Time      // when we last sent switch packets
-	lastActivated     time.Time      // when cursor last arrived on this machine
-	remoteX           int32          // virtual cursor position on remote (pixels)
-	remoteY           int32          // virtual cursor position on remote (pixels)
-	remoteW           int32          // detected remote screen width
-	remoteH           int32          // detected remote screen height
-	accelMult         float64        // scaling applied to raw evdev deltas (config: accel_multiplier)
-	edgeY             int32          // Y position where cursor left local screen
-	canSwitch         bool           // true once cursor has been away from edge since activation
-	canReturn         bool           // true once cursor has moved away from the remote return edge
-	hotkeyCtrl        bool           // tracks Ctrl key state for hotkey detection
-	hotkeyAlt         bool           // tracks Alt key state for hotkey detection
-	disabledXinputIDs []int          // device IDs we disabled — re-enable same set to avoid TOCTOU
+	conn          *network.Conn
+	screen        ScreenInfo
+	active        bool   // true = cursor is on this machine
+	edgeSide      string // "left" or "right"
+	mu            sync.Mutex
+	stopCh        chan struct{}
+	wg            sync.WaitGroup            // tracks all goroutines for clean Stop()
+	devices       map[string]*trackedDevice // open /dev/input/event* fds, keyed by path
+	stopped       bool                      // set by Stop(); blocks new goroutines racing wg.Wait
+	lastSwitch    time.Time                 // debounce outgoing switches
+	switchSent    time.Time                 // when we last sent switch packets
+	lastActivated time.Time                 // when cursor last arrived on this machine
+	remoteX       int32                     // virtual cursor position on remote (pixels)
+	remoteY       int32                     // virtual cursor position on remote (pixels)
+	remoteW       int32                     // detected remote screen width
+	remoteH       int32                     // detected remote screen height
+	accelMult     float64                   // scaling applied to raw evdev deltas (config: accel_multiplier)
+	edgeY         int32                     // Y position where cursor left local screen
+	canSwitch     bool                      // true once cursor has been away from edge since activation
+	canReturn     bool                      // true once cursor has moved away from the remote return edge
+	hotkeyCtrl    bool                      // tracks Ctrl key state for hotkey detection
+	hotkeyAlt     bool                      // tracks Alt key state for hotkey detection
+}
+
+// trackedDevice is one open /dev/input/event* node.
+type trackedDevice struct {
+	file *os.File
+	grab bool // keyboard or pointer: suppress it while the cursor is remote
 }
 
 // New creates a new input capturer.
-// Does NOT call enableXinput — Stop() on the previous Capturer already
-// re-enables any devices it disabled. Calling xinput enable unconditionally
-// here can corrupt the attachment state of floating slave devices.
+// Nothing needs releasing here: grabs are owned by the previous Capturer's file
+// descriptors, and the kernel dropped them when those descriptors closed.
 func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 	return &Capturer{
 		conn:      conn,
@@ -127,10 +132,10 @@ func (c *Capturer) SetActive(active bool) {
 		c.canReturn = false // must move away from remote edge before next return switch
 	}
 	c.mu.Unlock()
-	// enableXinput acquires c.mu internally — must be called after unlock.
+	// releaseInput acquires c.mu internally — must be called after unlock.
 	// Calling it under the lock caused a deadlock that froze all goroutines.
 	if shouldEnable {
-		c.enableXinput()
+		c.releaseInput()
 	}
 }
 
@@ -234,27 +239,26 @@ func (c *Capturer) SetAccelMultiplier(m float64) {
 	slog.Info("cursor acceleration multiplier set", "accel_multiplier", m)
 }
 
-// Stop signals the capturer to stop, waits for all goroutines to exit,
-// and ensures xinput devices are always re-enabled on teardown.
+// Stop signals the capturer to stop and waits for all goroutines to exit.
+//
+// Closing the device descriptors is what restores local input: the kernel drops
+// every EVIOCGRAB held on a descriptor as it closes. There is deliberately no
+// separate release step here, because a release step is something that can be
+// skipped — which is exactly how the previous xinput-based teardown could leave
+// the machine with no mouse and no keyboard.
 func (c *Capturer) Stop() {
 	close(c.stopCh)
 	// Close all device fds to unblock any goroutines stuck in f.Read().
 	// Without this, monitorDevice goroutines block indefinitely and accumulate
 	// across reconnect cycles (35 devices × N reconnects = goroutine storm).
 	c.mu.Lock()
-	for _, f := range c.deviceFiles {
-		_ = f.Close()
+	c.stopped = true
+	for _, d := range c.devices {
+		_ = d.file.Close()
 	}
+	c.devices = nil
 	c.mu.Unlock()
 	c.wg.Wait()
-	// Only re-enable if WE disabled them — avoids calling xinput enable on
-	// floating/unmanaged devices which can corrupt their attachment state.
-	c.mu.Lock()
-	hasDisabled := len(c.disabledXinputIDs) > 0
-	c.mu.Unlock()
-	if hasDisabled {
-		c.enableXinput()
-	}
 }
 
 // Run starts edge detection polling and evdev monitoring.
@@ -272,20 +276,113 @@ func (c *Capturer) Run() error {
 		c.pollCursorEdge()
 	}()
 	for _, d := range devices {
-		f, err := os.Open(d)
-		if err != nil {
-			continue
-		}
-		c.mu.Lock()
-		c.deviceFiles = append(c.deviceFiles, f)
-		c.mu.Unlock()
-		c.wg.Add(1)
-		go func(file *os.File) {
-			defer c.wg.Done()
-			c.monitorDevice(file)
-		}(f)
+		c.addDevice(d)
 	}
+	c.mu.Lock()
+	targets := 0
+	for _, d := range c.devices {
+		if d.grab {
+			targets++
+		}
+	}
+	c.mu.Unlock()
+	slog.Info("classified input devices", "tracked", len(devices), "keyboards_and_pointers", targets)
 	return nil
+}
+
+// addDevice opens, classifies and starts monitoring one device node. Devices
+// that cannot be opened are skipped: /dev/input entries appear before udev has
+// applied permissions, and a node can vanish between listing and opening.
+func (c *Capturer) addDevice(path string) {
+	c.mu.Lock()
+	_, known := c.devices[path]
+	stopped := c.stopped
+	c.mu.Unlock()
+	if known || stopped {
+		return
+	}
+
+	// O_NONBLOCK is what makes Stop() able to finish. Opened blocking, the fd is
+	// not registered with Go's poller, a parked read(2) is not interrupted by
+	// Close(), and monitorDevice only returns once that device happens to emit
+	// an event — which silent nodes (power buttons, audio-jack detect) never do.
+	// Stop() then waits forever in wg.Wait(). Non-blocking fds go through the
+	// poller, where Close() evicts pending reads, with no added input latency.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return
+	}
+	grabbable := isGrabTarget(f)
+
+	c.mu.Lock()
+	// Re-check under the lock: Stop() may have run, and a concurrent refresh
+	// may have added this same path.
+	if c.stopped {
+		c.mu.Unlock()
+		_ = f.Close()
+		return
+	}
+	if _, dup := c.devices[path]; dup {
+		c.mu.Unlock()
+		_ = f.Close()
+		return
+	}
+	if c.devices == nil {
+		c.devices = make(map[string]*trackedDevice)
+	}
+	c.devices[path] = &trackedDevice{file: f, grab: grabbable}
+	// wg.Add must happen under the same lock that guards c.stopped, otherwise
+	// it can race an in-progress wg.Wait() in Stop().
+	c.wg.Add(1)
+	c.mu.Unlock()
+
+	go func() {
+		defer c.wg.Done()
+		c.monitorDevice(f)
+	}()
+}
+
+// refreshDevices brings the tracked set in line with what is actually present
+// in /dev/input.
+//
+// Input devices come and go while mwb runs: wireless receivers re-enumerate on
+// wake, hubs re-attach, users plug in a second mouse mid-session. A set captured
+// once at startup goes stale, and an untracked device is neither forwarded nor
+// grabbed — its motion would leak straight to the local display while the cursor
+// is on the remote machine.
+func (c *Capturer) refreshDevices() {
+	paths, err := findInputDevices()
+	if err != nil {
+		slog.Warn("rescan input devices", "err", err)
+		return
+	}
+	live := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		live[p] = struct{}{}
+	}
+
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return
+	}
+	var gone []*os.File
+	for path, d := range c.devices {
+		if _, ok := live[path]; !ok {
+			gone = append(gone, d.file)
+			delete(c.devices, path)
+		}
+	}
+	c.mu.Unlock()
+
+	// Closing releases any grab the kernel still holds on the vanished node and
+	// unblocks its monitorDevice goroutine.
+	for _, f := range gone {
+		_ = f.Close()
+	}
+	for _, p := range paths {
+		c.addDevice(p)
+	}
 }
 
 // pollCursorEdge checks the actual cursor position and triggers switches.
@@ -385,8 +482,8 @@ func (c *Capturer) pollCursorEdge() {
 				c.canReturn = false // must move away from return edge first
 				c.mu.Unlock()
 
-				// Disable local input in X11 (synchronous — only takes ~2ms)
-				c.disableXinput()
+				// Suppress local input (synchronous — one ioctl per device)
+				c.grabInput()
 
 				// Send mouse burst to the entry position on remote
 				// Multiple packets help Windows MWB register the switch reliably
@@ -451,13 +548,13 @@ func detect() {
 	}
 
 	cachedDisplay = d
-	// Set in process environment so all child commands (xrandr, xdotool, xinput, xclip) inherit it
+	// Set in process environment so all child commands (xrandr, xdotool, xclip) inherit it
 	if err := os.Setenv("DISPLAY", d); err != nil {
 		slog.Warn("failed to set DISPLAY env", "err", err)
 	}
 	slog.Info("X11 display detected", "display", d)
 
-	// Also ensure XAUTHORITY is set — xdotool/xinput/xclip need it when running as root
+	// Also ensure XAUTHORITY is set — xdotool/xclip need it when running as root
 	detectAndSetXauthority(d)
 }
 
@@ -555,100 +652,58 @@ func getCursorPosition() (x, y int32, err error) {
 	return int32(ix), int32(iy), nil
 }
 
-// getXinputIDs finds xinput device IDs for Razer/Wooting devices.
-func getXinputIDs() []int {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "xinput", "list")
-	cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
+// grabTargetFiles snapshots the keyboards and pointers currently tracked, so
+// the ioctls below run without holding c.mu.
+func (c *Capturer) grabTargetFiles() []*os.File {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	targets := make([]*os.File, 0, len(c.devices))
+	for _, d := range c.devices {
+		if d.grab {
+			targets = append(targets, d.file)
+		}
 	}
-	return parseXinputIDs(string(out))
+	return targets
 }
 
-// parseXinputIDs extracts IDs of attached (non-floating) Razer/Wooting devices
-// from the output of `xinput list`. Separated from getXinputIDs for testability.
-//
-// Key invariant: NEVER include [floating slave] devices. xinput enable/disable
-// on floating slaves corrupts their attachment state and leaves them unrecoverable
-// without manual xinput reattach + xinput enable.
-func parseXinputIDs(output string) []int {
-	var ids []int
-	for _, line := range strings.Split(output, "\n") {
-		lower := strings.ToLower(line)
-		// Skip floating slaves — they are not attached to a master device and
-		// don't inject events into X11. Calling xinput disable/enable on them
-		// detaches them permanently, requiring manual recovery.
-		if strings.Contains(line, "[floating slave]") {
+// grabInput takes an exclusive kernel grab on every local keyboard and pointer,
+// so their events stop reaching the display server while the cursor is on the
+// remote machine. A device that fails to grab is logged and skipped rather than
+// aborting the switch — a partially grabbed state is still recoverable, whereas
+// refusing to switch would strand the cursor.
+func (c *Capturer) grabInput() {
+	// Pick up anything hot-plugged since the last switch before suppressing.
+	c.refreshDevices()
+	targets := c.grabTargetFiles()
+
+	grabbed := 0
+	for _, f := range targets {
+		if err := setGrab(f, true); err != nil {
+			slog.Warn("grab input device", "device", f.Name(), "err", err)
 			continue
 		}
-		if strings.Contains(lower, "razer") || strings.Contains(lower, "wooting") {
-			if idx := strings.Index(line, "id="); idx >= 0 {
-				numStr := ""
-				for _, ch := range line[idx+3:] {
-					if ch >= '0' && ch <= '9' {
-						numStr += string(ch)
-					} else {
-						break
-					}
-				}
-				if id, err := strconv.Atoi(numStr); err == nil {
-					ids = append(ids, id)
-				}
-			}
+		grabbed++
+	}
+	slog.Info("grabbed local input devices", "count", grabbed, "of", len(targets))
+}
+
+// releaseInput drops the grabs, returning local input to the display server.
+//
+// This is an optimisation, not a correctness requirement. If it never runs the
+// kernel releases every grab when the process's descriptors close, so a crash,
+// a SIGKILL or an OOM kill all restore input on their own.
+func (c *Capturer) releaseInput() {
+	targets := c.grabTargetFiles()
+
+	released := 0
+	for _, f := range targets {
+		if err := setGrab(f, false); err != nil {
+			slog.Warn("release input device", "device", f.Name(), "err", err)
+			continue
 		}
+		released++
 	}
-	return ids
-}
-
-// disableXinput disables Razer/Wooting devices and caches which IDs were disabled
-// so enableXinput re-enables the exact same set (avoids TOCTOU if devices change).
-func (c *Capturer) disableXinput() {
-	ids := getXinputIDs()
-	c.mu.Lock()
-	c.disabledXinputIDs = ids
-	c.mu.Unlock()
-	for _, id := range ids {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		cmd := exec.CommandContext(ctx, "xinput", "disable", strconv.Itoa(id))
-		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
-		cancel()
-	}
-	slog.Info("disabled Razer/Wooting xinput devices", "count", len(ids))
-}
-
-// enableXinput re-enables the exact device IDs that were disabled by disableXinput.
-// Also scans for any Razer/Wooting devices that are attached-but-disabled from a
-// previous broken session (e.g. disableXinput ran but enableXinput never did because
-// the connection dropped). Only touches attached slaves — never floating devices.
-func (c *Capturer) enableXinput() {
-	c.mu.Lock()
-	ids := c.disabledXinputIDs
-	c.disabledXinputIDs = nil
-	c.mu.Unlock()
-
-	// Always include currently-disabled attached devices to recover from prior
-	// broken sessions — idempotent for already-enabled devices.
-	current := getXinputIDs()
-	merged := make(map[int]struct{}, len(ids)+len(current))
-	for _, id := range ids {
-		merged[id] = struct{}{}
-	}
-	for _, id := range current {
-		merged[id] = struct{}{}
-	}
-
-	for id := range merged {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		cmd := exec.CommandContext(ctx, "xinput", "enable", strconv.Itoa(id))
-		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
-		cancel()
-	}
-	slog.Info("enabled Razer/Wooting xinput devices", "count", len(merged))
+	slog.Info("released local input devices", "count", released, "of", len(targets))
 }
 
 func findInputDevices() ([]string, error) {
@@ -806,7 +861,10 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		c.canSwitch = false // block re-trigger until cursor moves away from edge
 		c.mu.Unlock()
 
-		// Move cursor away from edge SYNCHRONOUSLY before enabling xinput
+		// Move cursor away from edge SYNCHRONOUSLY before releasing the grab.
+		// Ordering is load-bearing: release first and in-flight physical mouse
+		// motion drives the cursor straight back into the edge, bouncing the
+		// switch. Move first, then hand input back.
 		var entryX int32
 		if c.edgeSide == "left" {
 			entryX = 100
@@ -822,7 +880,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		_ = cmd.Run()
 		cancel()
 
-		c.enableXinput()
+		c.releaseInput()
 		c.mu.Lock()
 		return
 	}
