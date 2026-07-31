@@ -16,6 +16,7 @@ import (
 	"github.com/lucky-verma/mwb-linux/internal/capture"
 	"github.com/lucky-verma/mwb-linux/internal/clipboard"
 	"github.com/lucky-verma/mwb-linux/internal/config"
+	"github.com/lucky-verma/mwb-linux/internal/filetransfer"
 	"github.com/lucky-verma/mwb-linux/internal/input"
 	"github.com/lucky-verma/mwb-linux/internal/network"
 	"github.com/lucky-verma/mwb-linux/internal/selfupdate"
@@ -138,13 +139,37 @@ func main() {
 		KeyboardLayout:    keyboardLayout,
 	}
 
+	// File transfer shares the control port: MWB opens a second connection there
+	// for file copies. A nil handler leaves those connections rejected.
+	var onFile network.InboundFile
+	if cfg.FileTransferEnabled() {
+		fileDir := cfg.FileDirectory()
+		maxFile := cfg.MaxFileSize
+		slog.Info("file transfer enabled", "dir", fileDir, "max_bytes", filetransfer.EffectiveMaxSize(maxFile))
+		onFile = func(c *network.Conn, push bool) {
+			res, err := filetransfer.Receive(c.Reader(), fileDir, maxFile)
+			if err != nil {
+				slog.Error("inbound file transfer failed", "err", err)
+				return
+			}
+			if res.Path == "" {
+				// Oversized clipboard payload rather than a file; the clipboard
+				// manager owns that content, not the filesystem.
+				slog.Info("received inline clipboard payload over the file channel",
+					"name", res.Name, "bytes", res.Size)
+				return
+			}
+			filetransfer.Notify(res)
+		}
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// Start TCP server to accept incoming connections from Windows MWB.
 	// Only the configured host (cfg.Host) is accepted as an inbound peer.
 	serverStop := make(chan struct{})
-	incomingCh, err := network.ListenAndAccept(cfg.MessagePort(), cfg.Key, cfg.Name, cfg.Host, serverStop)
+	incomingCh, err := network.ListenAndAccept(cfg.MessagePort(), cfg.Key, cfg.Name, cfg.Host, onFile, serverStop)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error starting listener: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Is another mwb instance already running?")

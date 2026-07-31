@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **File copy between machines, both directions.** Copy a file on Windows and it
+  lands in `~/Downloads/mwb`; copy one on Linux and it goes to the peer. File
+  bytes do not travel over the control packet stream: MWB opens a second
+  connection to the same port, and packet types 70/71/72/75 only coordinate the
+  Windows drag-and-drop UI. Matches MWB's own scope, so single files only, no
+  folders, with a 100 MB default cap taken from
+  `MAX_CLIPBOARD_FILE_SIZE_CAN_BE_SENT`. Configurable via `file_transfer`,
+  `file_dir` and `max_file_size`. The wire format and the receive-side safety
+  controls are documented in `docs/plans/2026-07-30-file-transfer-design.md`.
 - `mwb update` downloads and installs the latest GitHub release, verifying it
   against the SHA-256 in that release's `checksums.txt` and replacing the binary
   atomically. `--check` reports availability without installing; `--force`

@@ -147,7 +147,7 @@ func TestListenAndAcceptReturnsBindError(t *testing.T) {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	stop := make(chan struct{})
-	connCh, err := ListenAndAccept(port, "TestSecurityKey!!", "linux-test", "192.168.1.100", stop)
+	connCh, err := ListenAndAccept(port, "TestSecurityKey!!", "linux-test", "192.168.1.100", nil, stop)
 	if err == nil {
 		close(stop)
 		t.Fatal("expected bind error, got nil")

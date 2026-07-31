@@ -44,6 +44,11 @@ var errDecompressedTooLarge = errors.New("decompressed clipboard exceeds size li
 
 // Manager handles clipboard synchronization.
 type Manager struct {
+	// OnFileCopy is invoked when the local clipboard holds a file selection.
+	// File bytes do not travel over the clipboard packet stream, so the actual
+	// transfer belongs to the file channel; nil disables file sending.
+	OnFileCopy func(paths []string)
+
 	conn        *network.Conn
 	display     string
 	lastHash    string // hash of last clipboard content we sent
@@ -114,6 +119,29 @@ func (m *Manager) pollClipboard() {
 			m.mu.Unlock()
 			if recentlySet {
 				continue
+			}
+
+			// A copied file also offers text/plain holding its path, so files
+			// must be checked before text or the path gets sent as a string.
+			if m.OnFileCopy != nil {
+				if paths := m.getLocalFileClipboard(); len(paths) > 0 {
+					hash := "file:" + strings.Join(paths, "\x00")
+					m.mu.Lock()
+					changed := hash != m.lastHash
+					if changed {
+						m.lastHash = hash
+					}
+					m.mu.Unlock()
+					if changed {
+						slog.Info("file clipboard changed, sending to remote", "count", len(paths))
+						m.wg.Add(1)
+						go func(p []string) {
+							defer m.wg.Done()
+							m.OnFileCopy(p)
+						}(paths)
+					}
+					continue
+				}
 			}
 
 			// Check for image clipboard first
