@@ -10,7 +10,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// probeTimeout bounds the local helper commands used to describe the install:
+// neither dpkg-query nor systemctl should ever hang an update.
+const probeTimeout = 5 * time.Second
+
+// unitName is the systemd user unit shipped by the installers.
+const unitName = "mwb.service"
 
 // Options controls one `mwb update` invocation.
 type Options struct {
@@ -57,7 +65,7 @@ func Run(ctx context.Context, opts Options) error {
 	if exePath, err = filepath.EvalSymlinks(exePath); err != nil {
 		return fmt.Errorf("resolve running binary: %w", err)
 	}
-	if pkg, managed := packageOwner(exePath); managed {
+	if pkg, managed := packageOwner(ctx, exePath); managed {
 		say("\n%s is managed by the %q package.\n", exePath, pkg)
 		say("Update it through apt instead, so dpkg stays in sync:\n\n")
 		say("    sudo apt install --only-upgrade %s\n\n", pkg)
@@ -114,7 +122,7 @@ func Run(ctx context.Context, opts Options) error {
 	say("\nInstalled %s to %s\n", rel.Version, exePath)
 
 	// The old binary keeps running until the service is restarted.
-	if unit, running := runningUnit(); running {
+	if unit, running := runningUnit(ctx); running {
 		say("\nThe running service is still on the previous version. Restart it with:\n\n")
 		say("    systemctl --user restart %s\n", unit)
 	} else {
@@ -156,12 +164,14 @@ func checkWritable(exePath string) error {
 }
 
 // packageOwner reports the dpkg package owning path, if any.
-func packageOwner(path string) (string, bool) {
+func packageOwner(ctx context.Context, path string) (string, bool) {
 	dpkg, err := exec.LookPath("dpkg-query")
 	if err != nil {
 		return "", false
 	}
-	out, err := exec.Command(dpkg, "-S", path).Output()
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, dpkg, "-S", path).Output()
 	if err != nil {
 		return "", false // not owned by any package
 	}
@@ -173,17 +183,19 @@ func packageOwner(path string) (string, bool) {
 }
 
 // runningUnit reports the systemd user unit if one is active.
-func runningUnit() (string, bool) {
+func runningUnit(ctx context.Context) (string, bool) {
 	systemctl, err := exec.LookPath("systemctl")
 	if err != nil {
 		return "", false
 	}
-	out, err := exec.Command(systemctl, "--user", "is-active", "mwb.service").Output()
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, systemctl, "--user", "is-active", unitName).Output()
 	if err != nil {
 		return "", false
 	}
 	if strings.TrimSpace(string(out)) != "active" {
 		return "", false
 	}
-	return "mwb.service", true
+	return unitName, true
 }
