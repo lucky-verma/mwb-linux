@@ -296,9 +296,9 @@ mwb -bidi -edge left -debug
 These are non-obvious rules that **must not be broken** by refactoring.
 Each has caused a production bug when violated.
 
-### Mutex: never hold `c.mu` when calling `grabInput()` / `releaseInput()`
+### Mutex: never hold `c.mu` when calling `applyIsolation()`
 
-Both methods acquire `c.mu` internally. Calling them while already holding `c.mu`
+It acquires `c.mu` internally. Calling them while already holding `c.mu`
 causes an immediate deadlock — Go's `sync.Mutex` is not reentrant. `SetActive` and
 `handleRel` release `c.mu` explicitly before calling these methods.
 **Test:** `TestSetActive_NoDeadlockOnActivate`.
@@ -308,7 +308,7 @@ causes an immediate deadlock — Go's `sync.Mutex` is not reentrant. `SetActive`
 func (c *Capturer) SetActive(active bool) {
     c.mu.Lock()
     defer c.mu.Unlock()
-    c.releaseInput() // tries to acquire c.mu → deadlock
+    c.applyIsolation() // tries to acquire c.mu → deadlock
 }
 
 // CORRECT
@@ -316,9 +316,23 @@ func (c *Capturer) SetActive(active bool) {
     c.mu.Lock()
     // ... update state ...
     c.mu.Unlock()   // release first
-    c.releaseInput() // then call
+    c.applyIsolation() // then call
 }
 ```
+
+### Isolation direction is derived inside `grabMu`, never passed in by the caller
+
+Outbound switches run on `pollCursorEdge`; returns run on the network handler
+via `SetActive`. With each caller stating its own intent, a release belonging to
+a finished switch-back could land *after* the grab for the next switch-out,
+leaving local input live while the cursor was on the remote machine — observed
+as a window of dual-cursor movement. `applyIsolation` serializes on `grabMu` and
+re-reads `c.active` inside it, so the last writer always converges on the true
+state.
+
+`setIsolation` also skips devices already in the target state: re-grabbing a
+device this process already holds returns `EBUSY`, which would otherwise be
+logged as a failure and undercount the result.
 
 ### Never grab virtual (uinput) devices
 
@@ -358,8 +372,8 @@ detect) never do — and `Stop()` waits forever in `wg.Wait()`.
 Wireless receivers re-enumerate on wake, hubs re-attach, users plug in a second
 mouse mid-session. A set captured once at startup goes stale, and an untracked
 device is never grabbed — its motion leaks straight to the local display while
-the cursor is on the remote machine. `grabInput()` calls `refreshDevices()`
-first. **Test:** `TestRefreshDevices_AdoptsDevicesPresentOnDisk`.
+the cursor is on the remote machine. `applyIsolation()` calls `refreshDevices()`
+before suppressing. **Test:** `TestRefreshDevices_AdoptsDevicesPresentOnDisk`.
 
 ### Cursor position: both `OnActivated` and `OnReclaimed` must move cursor away from edge
 

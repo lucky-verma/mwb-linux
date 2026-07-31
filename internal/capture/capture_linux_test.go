@@ -132,8 +132,8 @@ func TestAcceptsActivation_RightEdgeOnlyAcceptsRemoteLeftEdge(t *testing.T) {
 
 // --- SetActive mutex invariant ---
 
-// SetActive must NOT hold c.mu when calling releaseInput.
-// releaseInput acquires c.mu internally, so holding it in SetActive causes deadlock.
+// SetActive must NOT hold c.mu when calling applyIsolation.
+// applyIsolation acquires c.mu internally, so holding it in SetActive causes deadlock.
 // This test catches that regression by running SetActive with a timeout.
 func TestSetActive_NoDeadlockOnActivate(t *testing.T) {
 	c := &Capturer{
@@ -155,7 +155,7 @@ func TestSetActive_NoDeadlockOnActivate(t *testing.T) {
 	case <-done:
 		// pass — no deadlock
 	case <-time.After(3 * time.Second):
-		t.Fatal("SetActive deadlocked — check that releaseInput() is called AFTER c.mu.Unlock()")
+		t.Fatal("SetActive deadlocked — check that applyIsolation() is called AFTER c.mu.Unlock()")
 	}
 }
 

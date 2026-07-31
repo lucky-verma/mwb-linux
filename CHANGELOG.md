@@ -35,6 +35,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `xinput` is no longer a runtime dependency.
 
 ### Fixed
+- Isolation direction is now derived from cursor ownership inside a dedicated
+  mutex instead of being stated by each caller. Outbound switches run on
+  `pollCursorEdge` and returns run on the network handler, so a release
+  belonging to a finished switch-back could land after the grab for the next
+  switch-out and leave local input live while the cursor was on the remote
+  machine — a window of dual-cursor movement, observed live as
+  `grabbed … count=11 of=12` immediately followed by `released … count=12`.
+  Devices already in the target state are also skipped, since re-grabbing a
+  device this process already holds returns `EBUSY` and undercounted the result.
 - `Stop()` could hang forever in `wg.Wait()`. Input devices were opened blocking,
   so their fds were not registered with Go's poller and `Close()` did not
   interrupt a parked `read(2)`; a monitor goroutine for a silent device (power

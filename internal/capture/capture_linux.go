@@ -74,6 +74,9 @@ type Capturer struct {
 	active        bool   // true = cursor is on this machine
 	edgeSide      string // "left" or "right"
 	mu            sync.Mutex
+	grabMu        sync.Mutex                 // serializes isolation changes; never held with mu
+	setGrabFn     func(*os.File, bool) error // test seam; nil uses the real ioctl
+	findDevicesFn func() ([]string, error)   // test seam; nil scans /dev/input
 	stopCh        chan struct{}
 	wg            sync.WaitGroup            // tracks all goroutines for clean Stop()
 	devices       map[string]*trackedDevice // open /dev/input/event* fds, keyed by path
@@ -95,8 +98,9 @@ type Capturer struct {
 
 // trackedDevice is one open /dev/input/event* node.
 type trackedDevice struct {
-	file *os.File
-	grab bool // keyboard or pointer: suppress it while the cursor is remote
+	file    *os.File
+	grab    bool // keyboard or pointer: suppress it while the cursor is remote
+	grabbed bool // whether the exclusive grab is currently held
 }
 
 // New creates a new input capturer.
@@ -132,10 +136,10 @@ func (c *Capturer) SetActive(active bool) {
 		c.canReturn = false // must move away from remote edge before next return switch
 	}
 	c.mu.Unlock()
-	// releaseInput acquires c.mu internally — must be called after unlock.
+	// applyIsolation acquires c.mu internally — must be called after unlock.
 	// Calling it under the lock caused a deadlock that froze all goroutines.
 	if shouldEnable {
-		c.releaseInput()
+		c.applyIsolation()
 	}
 }
 
@@ -351,7 +355,11 @@ func (c *Capturer) addDevice(path string) {
 // grabbed — its motion would leak straight to the local display while the cursor
 // is on the remote machine.
 func (c *Capturer) refreshDevices() {
-	paths, err := findInputDevices()
+	discover := c.findDevicesFn
+	if discover == nil {
+		discover = findInputDevices
+	}
+	paths, err := discover()
 	if err != nil {
 		slog.Warn("rescan input devices", "err", err)
 		return
@@ -483,7 +491,7 @@ func (c *Capturer) pollCursorEdge() {
 				c.mu.Unlock()
 
 				// Suppress local input (synchronous — one ioctl per device)
-				c.grabInput()
+				c.applyIsolation()
 
 				// Send mouse burst to the entry position on remote
 				// Multiple packets help Windows MWB register the switch reliably
@@ -666,44 +674,73 @@ func (c *Capturer) grabTargetFiles() []*os.File {
 	return targets
 }
 
-// grabInput takes an exclusive kernel grab on every local keyboard and pointer,
-// so their events stop reaching the display server while the cursor is on the
-// remote machine. A device that fails to grab is logged and skipped rather than
-// aborting the switch — a partially grabbed state is still recoverable, whereas
-// refusing to switch would strand the cursor.
-func (c *Capturer) grabInput() {
-	// Pick up anything hot-plugged since the last switch before suppressing.
-	c.refreshDevices()
-	targets := c.grabTargetFiles()
+// applyIsolation brings the kernel grabs in line with who currently owns the
+// cursor: suppressed while the cursor is on the remote machine, live while it
+// is local.
+//
+// Both switch directions land here from different goroutines — pollCursorEdge
+// for outbound switches, the network handler via SetActive for returns. The
+// desired state is re-derived from c.active *inside* grabMu rather than being
+// passed in by the caller. That is what stops a late release belonging to a
+// finished switch-back from landing after the grab for the next switch-out and
+// leaving local input live while the cursor is on the remote machine, which
+// produced a window of dual-cursor movement.
+func (c *Capturer) applyIsolation() {
+	c.grabMu.Lock()
+	defer c.grabMu.Unlock()
 
-	grabbed := 0
-	for _, f := range targets {
-		if err := setGrab(f, true); err != nil {
-			slog.Warn("grab input device", "device", f.Name(), "err", err)
-			continue
-		}
-		grabbed++
+	suppress := !c.IsActive()
+	if suppress {
+		// A device plugged in while the cursor was away still has to be grabbed.
+		c.refreshDevices()
 	}
-	slog.Info("grabbed local input devices", "count", grabbed, "of", len(targets))
+
+	changed, total := c.setIsolation(suppress)
+	if changed == 0 {
+		return // already in the desired state
+	}
+	verb := "released"
+	if suppress {
+		verb = "grabbed"
+	}
+	slog.Info(verb+" local input devices", "count", changed, "of", total)
 }
 
-// releaseInput drops the grabs, returning local input to the display server.
+// setIsolation grabs or releases only the devices not already in that state and
+// reports how many changed out of how many were eligible.
 //
-// This is an optimisation, not a correctness requirement. If it never runs the
-// kernel releases every grab when the process's descriptors close, so a crash,
-// a SIGKILL or an OOM kill all restore input on their own.
-func (c *Capturer) releaseInput() {
-	targets := c.grabTargetFiles()
-
-	released := 0
-	for _, f := range targets {
-		if err := setGrab(f, false); err != nil {
-			slog.Warn("release input device", "device", f.Name(), "err", err)
+// Skipping devices already in the target state matters: re-grabbing a device
+// this process already holds returns EBUSY, which would otherwise be logged as
+// a failure and undercount the result.
+func (c *Capturer) setIsolation(grab bool) (changed, total int) {
+	c.mu.Lock()
+	var pending []*trackedDevice
+	for _, d := range c.devices {
+		if !d.grab {
 			continue
 		}
-		released++
+		total++
+		if d.grabbed != grab {
+			pending = append(pending, d)
+		}
 	}
-	slog.Info("released local input devices", "count", released, "of", len(targets))
+	c.mu.Unlock()
+
+	apply := c.setGrabFn
+	if apply == nil {
+		apply = setGrab
+	}
+	for _, d := range pending {
+		if err := apply(d.file, grab); err != nil {
+			slog.Warn("set input isolation", "device", d.file.Name(), "grab", grab, "err", err)
+			continue
+		}
+		c.mu.Lock()
+		d.grabbed = grab
+		c.mu.Unlock()
+		changed++
+	}
+	return changed, total
 }
 
 func findInputDevices() ([]string, error) {
@@ -880,7 +917,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		_ = cmd.Run()
 		cancel()
 
-		c.releaseInput()
+		c.applyIsolation()
 		c.mu.Lock()
 		return
 	}

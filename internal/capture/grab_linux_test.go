@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -77,7 +78,7 @@ func TestTestBit_EmptyBitmask(t *testing.T) {
 
 // --- release idempotency ---
 
-// releaseInput runs on every return-to-local, including paths where no grab was
+// Releasing runs on every return-to-local, including paths where no grab was
 // ever taken. The kernel answers EINVAL there; setGrab must treat that as
 // success so a spurious release is not logged as a failure.
 func TestSetGrab_ReleaseWithoutGrabIsNotAnError(t *testing.T) {
@@ -325,5 +326,141 @@ func TestStop_DrainsEvenWhenDevicesAreSilent(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("Stop() did not drain %d monitored devices; "+
 			"check that addDevice opens with O_NONBLOCK so Close() interrupts pending reads", tracked)
+	}
+}
+
+// --- isolation state machine ---
+
+// newFakeIsolated builds a Capturer with n grabbable devices whose grabs are
+// recorded rather than issued, so the state machine is testable without taking
+// a real user's mouse and keyboard away.
+func newFakeIsolated(t *testing.T, n int) (*Capturer, func() (grabbed int)) {
+	t.Helper()
+	c := &Capturer{stopCh: make(chan struct{}), devices: map[string]*trackedDevice{}}
+	for i := 0; i < n; i++ {
+		name := "/dev/input/fake" + string(rune('a'+i))
+		c.devices[name] = &trackedDevice{file: os.NewFile(0, name), grab: true}
+	}
+	c.setGrabFn = func(*os.File, bool) error { return nil }
+	// Keep discovery hermetic: without this, refreshDevices scans the real
+	// /dev/input, drops these fakes and pulls in whatever hardware the test
+	// machine happens to have.
+	paths := make([]string, 0, n)
+	for name := range c.devices {
+		paths = append(paths, name)
+	}
+	c.findDevicesFn = func() ([]string, error) { return paths, nil }
+	t.Cleanup(func() { c.mu.Lock(); c.devices = nil; c.mu.Unlock() })
+
+	return c, func() int {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		n := 0
+		for _, d := range c.devices {
+			if d.grabbed {
+				n++
+			}
+		}
+		return n
+	}
+}
+
+// Regression guard for the dual-cursor window observed at 19:45:44 on
+// 2026-07-30: the release belonging to a finished switch-back landed after the
+// grab for the next switch-out, un-grabbing devices while the cursor was on the
+// remote machine. Direction must come from c.active at apply time, so a late
+// caller cannot undo a newer state.
+func TestApplyIsolation_LateCallerCannotUndoNewerState(t *testing.T) {
+	c, grabbedCount := newFakeIsolated(t, 12)
+
+	// Cursor moves to the remote: everything suppressed.
+	c.mu.Lock()
+	c.active = false
+	c.mu.Unlock()
+	c.applyIsolation()
+	if got := grabbedCount(); got != 12 {
+		t.Fatalf("after switch-out: %d of 12 grabbed", got)
+	}
+
+	// A straggler from the previous switch-back now runs. Under the old API this
+	// called releaseInput() unconditionally and dropped all 12 grabs.
+	c.applyIsolation()
+	if got := grabbedCount(); got != 12 {
+		t.Errorf("a late caller released %d devices while the cursor was remote; "+
+			"local input would be live during remote control", 12-got)
+	}
+
+	// Cursor returns: everything restored.
+	c.mu.Lock()
+	c.active = true
+	c.mu.Unlock()
+	c.applyIsolation()
+	if got := grabbedCount(); got != 0 {
+		t.Errorf("after switch-back: %d devices still grabbed", got)
+	}
+}
+
+// Re-grabbing a device this process already holds returns EBUSY. Devices already
+// in the target state must be skipped, or that shows up as a spurious warning
+// and an undercount like the observed "count=11 of=12".
+func TestSetIsolation_SkipsDevicesAlreadyInTargetState(t *testing.T) {
+	c, _ := newFakeIsolated(t, 12)
+
+	var calls int
+	c.setGrabFn = func(*os.File, bool) error { calls++; return nil }
+
+	if changed, total := c.setIsolation(true); changed != 12 || total != 12 {
+		t.Fatalf("first grab: changed=%d total=%d, want 12/12", changed, total)
+	}
+	if calls != 12 {
+		t.Fatalf("first grab issued %d ioctls, want 12", calls)
+	}
+
+	calls = 0
+	changed, total := c.setIsolation(true)
+	if changed != 0 {
+		t.Errorf("redundant grab changed %d devices, want 0", changed)
+	}
+	if total != 12 {
+		t.Errorf("total = %d, want 12", total)
+	}
+	if calls != 0 {
+		t.Errorf("redundant grab issued %d ioctls; already-grabbed devices must be skipped "+
+			"or the kernel answers EBUSY and the count is wrong", calls)
+	}
+}
+
+// Concurrent switches must converge, not deadlock or end in a mixed state.
+func TestApplyIsolation_ConvergesUnderConcurrentSwitches(t *testing.T) {
+	c, grabbedCount := newFakeIsolated(t, 8)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.mu.Lock()
+			c.active = i%2 == 0
+			c.mu.Unlock()
+			c.applyIsolation()
+		}(i)
+	}
+	wg.Wait()
+
+	// Settle on a known state and confirm it is honoured.
+	c.mu.Lock()
+	c.active = false
+	c.mu.Unlock()
+	c.applyIsolation()
+	if got := grabbedCount(); got != 8 {
+		t.Errorf("after settling on cursor-remote: %d of 8 grabbed", got)
+	}
+
+	c.mu.Lock()
+	c.active = true
+	c.mu.Unlock()
+	c.applyIsolation()
+	if got := grabbedCount(); got != 0 {
+		t.Errorf("after settling on cursor-local: %d still grabbed", got)
 	}
 }
