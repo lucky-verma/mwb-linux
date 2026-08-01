@@ -94,6 +94,9 @@ type Capturer struct {
 	canReturn     bool                      // true once cursor has moved away from the remote return edge
 	hotkeyCtrl    bool                      // tracks Ctrl key state for hotkey detection
 	hotkeyAlt     bool                      // tracks Alt key state for hotkey detection
+	// OnActivated runs whenever this capturer transitions from remote control
+	// back to local ownership, including its own virtual-edge return path.
+	OnActivated func()
 }
 
 // trackedDevice is one open /dev/input/event* node.
@@ -129,6 +132,7 @@ func (c *Capturer) SetActive(active bool) {
 	wasActive := c.active
 	c.active = active
 	shouldEnable := active && !wasActive
+	onActivated := c.OnActivated
 	if shouldEnable {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
@@ -140,6 +144,9 @@ func (c *Capturer) SetActive(active bool) {
 	// Calling it under the lock caused a deadlock that froze all goroutines.
 	if shouldEnable {
 		c.applyIsolation()
+		if onActivated != nil {
+			onActivated()
+		}
 	}
 }
 
@@ -879,6 +886,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		remH := c.remoteH
 		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
 		c.active = true
+		onActivated := c.OnActivated
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
 		c.canSwitch = false // block re-trigger until cursor moves away from edge
@@ -904,6 +912,9 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		cancel()
 
 		c.applyIsolation()
+		if onActivated != nil {
+			onActivated()
+		}
 		c.mu.Lock()
 		return
 	}

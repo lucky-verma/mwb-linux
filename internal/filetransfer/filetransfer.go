@@ -1,8 +1,14 @@
 // Package filetransfer implements MWB's file copy channel.
 //
-// File bytes do not travel over the 32/64-byte control packet stream. MWB opens
-// a second TCP connection to the same port, performs the same IV exchange and
-// AES-CBC stream setup as the control channel, sends one 64-byte DATA packet
+// File bytes do not travel over the 32/64-byte control packet stream. MWB runs
+// two listeners and files use the other one:
+//
+//	skMessageServer   = new TcpServer(TcpPort + 1, TCPServerThread);
+//	skClipboardServer = new TcpServer(TcpPort,     AcceptConnectionAndSendClipboardData);
+//
+// A file channel is a second TCP connection to the *base* port, not to the
+// control port at base+1. It performs the same IV exchange and AES-CBC stream
+// setup as the control channel, sends one raw unstamped 64-byte DATA struct
 // with type Clipboard or ClipboardPush, and then sends:
 //
 //	a 1024-byte UTF-16LE header holding "<size>*<name>", null padded

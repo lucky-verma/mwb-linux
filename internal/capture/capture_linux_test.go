@@ -205,6 +205,23 @@ func TestSetActive_NoOpWhenAlreadyActive(t *testing.T) {
 	}
 }
 
+func TestSetActive_NotifiesOnlyOnTransitionToLocal(t *testing.T) {
+	activations := 0
+	c := &Capturer{
+		active:      false,
+		stopCh:      make(chan struct{}),
+		remoteW:     1920,
+		remoteH:     1080,
+		OnActivated: func() { activations++ },
+	}
+
+	c.SetActive(true)
+	c.SetActive(true)
+	if activations != 1 {
+		t.Fatalf("activation callbacks = %d, want exactly one for false -> true", activations)
+	}
+}
+
 // --- canSwitch / canReturn gates ---
 
 func TestCanSwitchGate_RequiresMoveAwayFromEdge(t *testing.T) {

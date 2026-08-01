@@ -5,9 +5,95 @@ package clipboard
 import (
 	"bytes"
 	"errors"
-	"github.com/lucky-verma/mwb-linux/internal/protocol"
+	"fmt"
+	"net"
 	"testing"
+	"time"
+
+	"github.com/lucky-verma/mwb-linux/internal/network"
+	"github.com/lucky-verma/mwb-linux/internal/protocol"
 )
+
+func controlPair(t *testing.T) (*network.Conn, *network.Conn) {
+	t.Helper()
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	stop := make(chan struct{})
+	incoming, err := network.ListenAndAccept(port, "TestSecurityKey!!", "windows", "127.0.0.1", nil, stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { close(stop) })
+
+	client, err := network.Connect(fmt.Sprintf("127.0.0.1:%d", port), "TestSecurityKey!!", "linux", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	var server *network.Conn
+	select {
+	case server = <-incoming:
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener did not return the control connection")
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	return client, server
+}
+
+// Official PowerToys sends Clipboard (a beat) for files and oversized data,
+// remembers it, and waits until the cursor switches to the receiving machine
+// before sending ClipboardAsk. Asking on the beat itself downloads every file
+// the user merely copies on Windows.
+func TestClipboardBeatWaitsForActivationBeforeRequest(t *testing.T) {
+	client, server := controlPair(t)
+	m := NewManager(client, "")
+
+	m.HandlePacket(&protocol.Packet{Type: protocol.Clipboard, Src: client.RemoteID})
+	m.mu.Lock()
+	pending := m.pendingPull
+	m.mu.Unlock()
+	if pending != client.RemoteID {
+		t.Fatalf("pending remote = %d, want %d", pending, client.RemoteID)
+	}
+
+	// MachineSwitched is the point where official MWB retrieves the pending
+	// large/file clipboard and prepares it for a later Ctrl+V.
+	m.HandleActivation()
+	var got *protocol.Packet
+	for range 32 {
+		pkt, err := server.RecvPacket()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pkt.Type == protocol.ClipboardAsk {
+			got = pkt
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("ClipboardAsk was not sent after the remote beat")
+		return
+	}
+	if got.Type != protocol.ClipboardAsk {
+		t.Fatalf("Type = %d, want ClipboardAsk", got.Type)
+	}
+	if got.Src != client.MachineID || got.Des != client.RemoteID {
+		t.Errorf("Src/Des = %d/%d, want %d/%d", got.Src, got.Des, client.MachineID, client.RemoteID)
+	}
+	if got.MachineName() != "linux" {
+		t.Errorf("MachineName = %q, want linux", got.MachineName())
+	}
+	if got.PostAction != protocol.PostActionOther {
+		t.Errorf("PostAction = %d, want Other", got.PostAction)
+	}
+}
 
 func TestDeflateDecompressRoundTrip(t *testing.T) {
 	want := []byte("clipboard payload")

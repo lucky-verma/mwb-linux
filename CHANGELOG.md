@@ -6,15 +6,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-01
+
+### Fixed
+- **File copy uses the clipboard port.** MWB runs two listeners —
+  `skMessageServer` on `TcpPort + 1` and `skClipboardServer` on `TcpPort` — and
+  only the second routes a connection into `ShakeHand` and the file receiver.
+  0.6.0 assumed a single port for both, so outbound copies were written to the
+  control server, which answered with a control `Handshake` and never read
+  them, and inbound copies were never offered at all because MWB dials the
+  clipboard port that nothing was listening on. Both ports are open on a
+  Windows peer, so the dial always succeeded and every failure was silent.
+  A live PowerToys peer now accepts the corrected channel before bytes are sent.
+- **Both halves of the file channel handshake are exchanged.** `ShakeHand`
+  writes its own 64-byte header and reads the peer's, in both roles. This side
+  did neither, so a pushing Windows client blocked in `ReadEx` until its 30s
+  receive timeout and then reported the channel as rejected. These headers are
+  raw `DATA` structs, not normal control packets: stamping one changes the
+  32-bit package type and makes PowerToys reject it. Outbound sends now require
+  a valid raw reply, so a rejected channel can no longer be logged as a
+  successful file send.
+- `UnmarshalPacket` could not decode the machine name on a file channel header:
+  it skipped bytes 32-63 whenever `ClipboardData` was set, which is always for a
+  clipboard type. MWB matches that name in
+  `ResolveID(name) == package.Src` before accepting the channel.
+- **Linux to Windows file copy now runs.** 0.6.0 shipped every part of the
+  sending half — `text/uri-list` clipboard detection, `DialFile`, the
+  block-aligned writer — but nothing ever assigned `Manager.OnFileCopy`, so the
+  callback stayed nil and the branch was unreachable. Copying a file on Linux
+  sent its name as text instead, which is the exact behaviour that detection
+  exists to prevent. Files are staged on the Windows clipboard so they can be
+  pasted into any chosen File Explorer folder.
+- **Windows to Linux now follows PowerToys' deferred clipboard flow.** PowerToys
+  does not push a file when it is copied; it broadcasts `Clipboard`, remembers
+  it for 30 seconds, and retrieves it only when the cursor switches onto the
+  receiving machine. Linux now does the same before sending `ClipboardAsk`.
+  The received file backs a native `x-special/gnome-copied-files` or generic
+  `text/uri-list` selection in private `$XDG_CACHE_HOME/mwb/clipboard` storage,
+  so copying on Windows does not spam a visible Linux folder; the chosen
+  destination is created only on Ctrl+V. Only the newest staged selection is
+  retained. The reply header also reuses the active control connection's
+  machine ID, which PowerToys requires when it checks
+  `ResolveID(name) == Src`.
+- Linux activation can arrive as either `MachineSwitched` or `NextMachine`,
+  depending on connection direction and screen topology. Both now trigger a
+  pending Windows clipboard pull. The bidirectional capturer's local
+  virtual-edge return is a third activation path with no inbound packet; it now
+  triggers the same callback. Reconnecting also baselines the existing Linux
+  selection instead of transmitting that stale file back to Windows.
+
+### Added
+- Outbound copies are validated before the connection is opened. Copying a
+  folder is common, and it no longer costs the peer a file channel that it only
+  ever sees opened and abandoned.
+- A 60s idle write deadline bounds an outbound transfer whose peer stops
+  reading. Total elapsed time is deliberately not capped, because a large file
+  over a slow link is legitimate; what is capped is time without progress. The
+  sending goroutine is tracked by the clipboard manager's WaitGroup and the
+  reconnect loop waits on that, so a wedged peer would otherwise stall
+  reconnection for as long as TCP took to give up.
+
 ## [0.6.0] - 2026-07-31
 
 ### Added
 - **File copy between machines, both directions.** Copy a file on Windows and it
   lands in `~/Downloads/mwb`; copy one on Linux and it goes to the peer. File
   bytes do not travel over the control packet stream: MWB opens a second
-  connection to the same port, and packet types 70/71/72/75 only coordinate the
-  Windows drag-and-drop UI. Matches MWB's own scope, so single files only, no
-  folders, with a 100 MB default cap taken from
+  connection on the base/clipboard port, and packet types 70/71/72/75 only
+  coordinate the Windows drag-and-drop UI. Matches MWB's own scope, so single
+  files only, no folders, with a 100 MB default cap taken from
   `MAX_CLIPBOARD_FILE_SIZE_CAN_BE_SENT`. Configurable via `file_transfer`,
   `file_dir` and `max_file_size`. The wire format and the receive-side safety
   controls are documented in `docs/plans/2026-07-30-file-transfer-design.md`.
@@ -313,7 +373,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.0...v0.4.1

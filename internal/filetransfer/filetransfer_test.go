@@ -355,6 +355,36 @@ func TestSend_RefusesDirectoriesAndOversize(t *testing.T) {
 	}
 }
 
+// Sendable is the gate a caller runs before opening a connection, so its
+// verdict has to match what Send would decide on its own.
+func TestSendable_MatchesWhatSendAccepts(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "ok.bin")
+	if err := os.WriteFile(file, bytes.Repeat([]byte("k"), 300), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unset cap must resolve to MWB's own limit rather than rejecting
+	// everything as "over a zero-byte cap".
+	size, err := Sendable(file, 0)
+	if err != nil {
+		t.Fatalf("Sendable with an unset cap: %v", err)
+	}
+	if size != 300 {
+		t.Errorf("size = %d, want 300", size)
+	}
+
+	if _, err := Sendable(dir, DefaultMaxSize); !errors.Is(err, ErrUnsafeName) {
+		t.Errorf("directory: err = %v, want ErrUnsafeName", err)
+	}
+	if _, err := Sendable(file, 16); !errors.Is(err, ErrSizeRejected) {
+		t.Errorf("over the cap: err = %v, want ErrSizeRejected", err)
+	}
+	if _, err := Sendable(filepath.Join(dir, "absent.bin"), DefaultMaxSize); err == nil {
+		t.Error("a missing path was accepted")
+	}
+}
+
 func mustEval(t *testing.T, dir string) string {
 	t.Helper()
 	real, err := filepath.EvalSymlinks(dir)
