@@ -184,6 +184,23 @@ func TestHandleNextMachineIgnoresRejectedFarEdge(t *testing.T) {
 	}
 }
 
+func TestBothActivationPacketsSignalCommonActivation(t *testing.T) {
+	mock := &MockInputDevice{}
+	activations := 0
+	h := &Handler{
+		Mouse:          mock,
+		Keyboard:       mock,
+		OnBecameActive: func() { activations++ },
+	}
+
+	h.HandlePacket(&protocol.Packet{Type: protocol.MachineSwitched})
+	h.HandlePacket(&protocol.Packet{Type: protocol.NextMachine})
+
+	if activations != 2 {
+		t.Fatalf("common activations = %d, want one for each accepted packet form", activations)
+	}
+}
+
 func TestHandleMouseButtons(t *testing.T) {
 	mock := &MockInputDevice{}
 	h := &Handler{Mouse: mock, Keyboard: mock}

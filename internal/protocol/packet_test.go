@@ -2,9 +2,49 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 )
+
+// The packet that opens a file channel carries no clipboard bytes, so MWB reads
+// the union at offset 16 as ClipboardPostAction and picks the destination
+// folder from it. The machine name still has to land at 32-63: MWB rejects the
+// channel unless it can resolve that name back to the ID in Src.
+func TestMarshal_FileChannelHeaderCarriesPostAction(t *testing.T) {
+	p := &Packet{Type: ClipboardPush, Src: 0x11223344, PostAction: PostActionDesktop}
+	p.SetMachineName("thinkersloop")
+
+	buf := p.Marshal()
+	if len(buf) != PacketSizeEx {
+		t.Fatalf("len = %d, want %d", len(buf), PacketSizeEx)
+	}
+	if got := binary.LittleEndian.Uint32(buf[16:20]); got != uint32(PostActionDesktop) {
+		t.Errorf("PostAction at offset 16 = %d, want %d", got, PostActionDesktop)
+	}
+	if got := strings.TrimRight(string(buf[32:64]), " "); got != "thinkersloop" {
+		t.Errorf("machine name at 32-63 = %q, want thinkersloop", got)
+	}
+
+	back, err := UnmarshalPacket(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.PostAction != PostActionDesktop {
+		t.Errorf("round-tripped PostAction = %d, want %d", back.PostAction, PostActionDesktop)
+	}
+}
+
+// PostAction shares its offset with real clipboard payload, so writing it must
+// stay confined to the packet that has no payload to lose.
+func TestMarshal_ClipboardPayloadSurvivesPostActionOffset(t *testing.T) {
+	data := bytes.Repeat([]byte{0xAB}, 48)
+	buf := (&Packet{Type: ClipboardText, ClipboardData: data}).Marshal()
+	if !bytes.Equal(buf[16:64], data) {
+		t.Errorf("payload at 16-63 = %x, want %x", buf[16:64], data)
+	}
+}
 
 func TestPacketMarshalRoundTrip(t *testing.T) {
 	p := &Packet{

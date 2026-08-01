@@ -46,6 +46,12 @@ type Packet struct {
 	Handshake     HandshakeData
 	ClipboardData []byte // 48 bytes of clipboard chunk data (bytes 16-63)
 
+	// PostAction shares offset 16 with the rest of the union. It is only
+	// meaningful on the packet that opens a file channel, which carries no
+	// clipboard bytes; on a data-carrying clipboard packet those same four
+	// bytes are payload, and this field is whatever they happened to be.
+	PostAction ClipboardPostAction
+
 	// Extended area (bytes 32-63, only for big packets)
 	machineName [32]byte
 }
@@ -106,6 +112,11 @@ func (p *Packet) Marshal() []byte {
 				n = 48
 			}
 			copy(buf[16:16+n], p.ClipboardData[:n])
+		} else {
+			// No payload means this packet opens a file channel rather than
+			// carrying clipboard bytes, so the union holds PostAction. MWB
+			// picks the destination folder from it.
+			binary.LittleEndian.PutUint32(buf[16:20], uint32(p.PostAction))
 		}
 	}
 
@@ -156,11 +167,19 @@ func UnmarshalPacket(buf []byte) (*Packet, error) {
 		if end > 16 {
 			p.ClipboardData = make([]byte, end-16)
 			copy(p.ClipboardData, buf[16:end])
+			// Same four bytes, read both ways: payload here, PostAction on the
+			// packet that opens a file channel. The caller knows which it has.
+			p.PostAction = ClipboardPostAction(binary.LittleEndian.Uint32(buf[16:20]))
 		}
 	}
 
-	// Extended area for big packets (but not clipboard — they use bytes 16-63 for data)
-	if IsBigPacket(p.Type) && len(buf) >= PacketSizeEx && p.ClipboardData == nil {
+	// Extended area for big packets. On a clipboard packet these bytes are
+	// payload rather than a name — the same overlap as offset 16, since the
+	// packet that opens a file channel names its sender there and a
+	// data-carrying one does not. Decoding both costs nothing, and the caller
+	// knows which kind it is holding. Skipping this for clipboard types left
+	// the name on a file channel's opening packet permanently unreadable.
+	if IsBigPacket(p.Type) && len(buf) >= PacketSizeEx {
 		copy(p.machineName[:], buf[32:64])
 	}
 

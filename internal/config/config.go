@@ -23,7 +23,10 @@ type Config struct {
 	// FileTransfer controls the MWB file copy channel. nil = enabled.
 	FileTransfer *bool `toml:"file_transfer"`
 
-	// FileDir is where received files are written. Empty = ~/Downloads/mwb.
+	// FileDir is retained only so older configs continue to decode. Clipboard
+	// files now use private cache staging and appear in a chosen folder on paste;
+	// writing every copied file into a visible directory was incorrect MWB UX.
+	// Deprecated: ignored.
 	FileDir string `toml:"file_dir"`
 
 	// MaxFileSize caps a single transfer in bytes. 0 = MWB's own 100 MB limit,
@@ -121,6 +124,20 @@ func (c *Config) MessagePort() int {
 	return c.Port + 1
 }
 
+// ClipboardPort is where file and clipboard channels are opened. MWB runs two
+// listeners and they are not the same one:
+//
+//	skMessageServer   = new TcpServer(TcpPort + 1, TCPServerThread);
+//	skClipboardServer = new TcpServer(TcpPort,     AcceptConnectionAndSendClipboardData);
+//
+// Control is TcpPort+1, which MessagePort returns. Clipboard is the base port,
+// and ConnectToRemoteClipboardSocket dials it. Sending a file channel to the
+// control port instead reaches TCPServerThread, which answers with a control
+// Handshake and never routes the connection to the file receiver.
+func (c *Config) ClipboardPort() int {
+	return c.Port
+}
+
 // ClipboardEnabled reports whether clipboard sharing should run. An absent
 // clipboard key keeps it enabled, preserving the prior default behavior.
 func (c *Config) ClipboardEnabled() bool {
@@ -133,8 +150,8 @@ func (c *Config) FileTransferEnabled() bool {
 	return c.FileTransfer == nil || *c.FileTransfer
 }
 
-// FileDirectory resolves where received files are written, defaulting to
-// ~/Downloads/mwb so arrivals land somewhere the user already looks.
+// FileDirectory resolves the legacy direct-download directory.
+// Deprecated: clipboard file transfers no longer use this path.
 func (c *Config) FileDirectory() string {
 	if c.FileDir != "" {
 		return os.ExpandEnv(c.FileDir)

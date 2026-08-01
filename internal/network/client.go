@@ -4,6 +4,7 @@ package network
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -59,9 +60,9 @@ func getCachedKeyMaterial(securityKey string) ([]byte, []byte, uint32) {
 
 // newSecureStream configures TCP options, creates the AES-CBC streams and
 // performs the IV block exchange. It stops before the handshake, because the
-// file-transfer channel shares this port and this prefix but continues
-// differently: it sends a Clipboard/ClipboardPush packet where the control
-// channel sends Handshake.
+// file-transfer channel shares this encrypted prefix but continues differently
+// on the adjacent clipboard port: it sends a raw Clipboard/ClipboardPush DATA
+// struct where the control channel sends a stamped Handshake packet.
 func newSecureStream(raw net.Conn, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
 	if timeout <= 0 {
 		timeout = handshakeTimeout
@@ -311,11 +312,14 @@ func isLocalNetwork(ip net.IP) bool {
 	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
-// InboundFile handles a peer-initiated file transfer. MWB opens a second
-// connection to this same port for file copies, identical to the control
-// channel up to the IV exchange and distinguished only by the first packet it
-// sends. The stream is positioned at the file header when this is called, and
-// the connection is closed once it returns.
+// InboundFile handles a peer-initiated file transfer. The connection is
+// identical to the control channel up to the IV exchange and distinguished only
+// by the first packet it sends. The stream is positioned at the file header
+// when this is called, and the connection is closed once it returns.
+//
+// A real MWB peer opens these against the clipboard port, which ListenFileChannel
+// serves; the control listener keeps the same branch so that two Linux clients
+// still interoperate over a single port.
 //
 // A nil handler rejects file connections, which is the behaviour before file
 // transfer existed.
@@ -424,6 +428,20 @@ func ListenAndAccept(port int, securityKey, machineName, allowedHost string, onF
 						_ = raw.Close()
 						return
 					}
+					// MWB's ShakeHand reads a 64-byte header from its peer in
+					// both roles, so a pushing Windows client sits in ReadEx
+					// until its 30s receive timeout unless this side answers,
+					// and then reports the channel as rejected. Mirror what MWB
+					// sends from the accepting side: a header naming us.
+					ack := &protocol.Packet{Type: protocol.ClipboardPush, Src: conn.MachineID}
+					ack.SetMachineName(machineName)
+					if err := conn.sendChannelHeader(ack); err != nil {
+						slog.Warn("file channel: could not acknowledge peer",
+							"remote", raw.RemoteAddr(), "err", err)
+						_ = raw.Close()
+						return
+					}
+
 					if err := raw.SetDeadline(time.Time{}); err != nil {
 						slog.Warn("clear file transfer deadline", "err", err)
 					}
@@ -554,6 +572,50 @@ func (c *Conn) SendPacket(p *protocol.Packet) error {
 	return err
 }
 
+// sendChannelHeader writes the raw DATA structure used by Clipboard.ShakeHand.
+// Unlike control packets, this header does not carry the MWB magic/checksum
+// stamp in bytes 1-3. Stamping it changes the uint32 PackageType from
+// Clipboard/ClipboardPush into an unknown value and PowerToys rejects the
+// channel before reading any file bytes.
+func (c *Conn) sendChannelHeader(p *protocol.Packet) error {
+	buf := p.Marshal()
+	if len(buf) != protocol.PacketSizeEx {
+		return fmt.Errorf("file channel header has %d bytes, want %d", len(buf), protocol.PacketSizeEx)
+	}
+
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	_ = c.raw.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	n, err := c.enc.Write(buf)
+	if err != nil {
+		return err
+	}
+	if n != len(buf) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+// recvChannelHeader reads the peer's half of the file channel handshake.
+//
+// ShakeHand writes that packet straight out of the DATA struct rather than
+// through the control send path, so it carries no magic stamp and RecvPacket
+// rejects it as a magic mismatch. Only the type, name and Src are meaningful
+// here, and the channel is already authenticated by the shared key: an
+// unstamped header cannot be read at all without it. Requiring the three bytes
+// to be zero is also a regression guard against accidentally using SendPacket,
+// which was the cause of outbound transfers being silently rejected.
+func (c *Conn) recvChannelHeader() (*protocol.Packet, error) {
+	buf := make([]byte, protocol.PacketSizeEx)
+	if _, err := io.ReadFull(c.dec, buf); err != nil {
+		return nil, fmt.Errorf("read channel header: %w", err)
+	}
+	if buf[1] != 0 || buf[2] != 0 || buf[3] != 0 {
+		return nil, fmt.Errorf("file channel header is stamped: type word 0x%08x", binary.LittleEndian.Uint32(buf[:4]))
+	}
+	return protocol.UnmarshalPacket(buf)
+}
+
 // RecvPacket reads, validates, and unmarshals a packet.
 func (c *Conn) RecvPacket() (*protocol.Packet, error) {
 	buf := make([]byte, protocol.PacketSize)
@@ -594,10 +656,26 @@ func (c *Conn) Close() error {
 
 // DialFile opens a file-transfer connection to the peer.
 //
-// MWB uses the same port and the same IV exchange as the control channel, then
-// identifies the connection by sending a Clipboard packet where the control
-// channel sends Handshake. The returned Conn is positioned for the caller to
-// write the file header and body; the caller owns closing it.
+// addr must be the peer's *clipboard* port, which is the base port, not the
+// control port. MWB runs skClipboardServer on TcpPort and skMessageServer on
+// TcpPort+1; only the former routes a connection into ShakeHand and the file
+// receiver. The control port answers with a Handshake instead and the transfer
+// is written into a socket that never reads it.
+//
+// The IV exchange is the same as the control channel's, and the connection is
+// then identified by its first packet, where the control channel sends
+// Handshake.
+//
+// That packet also declares which way the bytes flow. MWB's accept side reads
+// it as `clientPushData = package.Type == PackageType.ClipboardPush`, so
+// ClipboardPush means the dialer sends and the peer reads, while Clipboard
+// means the dialer is *asking* for the peer's clipboard and the peer sends —
+// which is the pull that MWB's own GetRemoteClipboard performs. Announcing
+// Clipboard while pushing leaves both ends waiting to read, and it fails
+// silently: the sender still writes its file into the socket and logs success.
+//
+// The returned Conn is positioned for the caller to write the file header and
+// body; the caller owns closing it.
 func DialFile(addr, securityKey, machineName string, machineID uint32, timeout time.Duration) (*Conn, error) {
 	raw, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
@@ -610,12 +688,38 @@ func DialFile(addr, securityKey, machineName string, machineID uint32, timeout t
 		return nil, err
 	}
 
-	hdr := &protocol.Packet{Type: protocol.Clipboard, Src: machineID}
+	hdr := &protocol.Packet{
+		Type: protocol.ClipboardPush,
+		Src:  machineID,
+		// "Other" stages the received file in MWB's private directory and places
+		// it on the Windows clipboard. The user can then paste it into any File
+		// Explorer folder, which is the normal MWB copy/paste workflow.
+		PostAction: protocol.PostActionOther,
+	}
 	hdr.SetMachineName(machineName)
-	if err := c.SendPacket(hdr); err != nil {
+	if err := c.sendChannelHeader(hdr); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("send file channel header: %w", err)
 	}
+
+	// MWB's ShakeHand writes its own header before it reads ours, so a reply is
+	// already in flight. Reading it is the step the client is documented to
+	// perform, and it is the only evidence this side can obtain that the peer
+	// reached its clipboard accept path: everything after this point is a
+	// one-way write that succeeds whether or not anyone is reading.
+	//
+	reply, err := c.recvChannelHeader()
+	if err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("receive file channel header: %w", err)
+	}
+	if reply.Type != protocol.Clipboard && reply.Type != protocol.ClipboardPush {
+		_ = raw.Close()
+		return nil, fmt.Errorf("receive file channel header: unexpected type %d", reply.Type)
+	}
+	c.RemoteName = reply.MachineName()
+	c.RemoteID = reply.Src
+	slog.Info("file channel accepted", "remote", c.RemoteName, "remoteID", c.RemoteID)
 
 	// The transfer itself is unbounded in time relative to a handshake.
 	if err := raw.SetDeadline(time.Time{}); err != nil {

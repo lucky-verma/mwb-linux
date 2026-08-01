@@ -31,6 +31,10 @@ const (
 	textTypeSep   = "{4CFF57F7-BEDD-43d5-AE8F-27A61E886F2F}"
 	maxInlineSize = 1048576     // 1 MB — max for inline TCP send
 	maxRecvBuf    = 2 * 1048576 // 2 MB — max in-flight clipboard receive buffer
+	// PowerToys remembers a large/file clipboard beat for 30 seconds and pulls
+	// it only when the cursor switches onto the receiving machine. Mirroring
+	// that timing avoids downloading every Windows copy immediately.
+	remoteClipboardTimeout = 30 * time.Second
 
 	// maxDecompressedSize caps the inflated size of an inbound clipboard payload.
 	// maxRecvBuf only bounds the *compressed* bytes; DEFLATE can expand ~1000:1,
@@ -57,21 +61,36 @@ type Manager struct {
 	receiving   bool
 	recvIsImage bool
 	justSet     time.Time // when we last set clipboard from remote — suppress re-send
+	pendingPull uint32    // remote ID whose large/file clipboard is waiting
+	pendingAt   time.Time // when the pending Clipboard beat arrived
 	stopCh      chan struct{}
 	wg          sync.WaitGroup // tracks pollClipboard goroutine for clean shutdown
+
+	// Inbound files are private clipboard backing storage, not downloads. The
+	// file manager copies from this hidden path only when the user pastes.
+	fileMu           sync.Mutex
+	stageRoot        string
+	setFileClipboard func(string) error
 }
 
 // NewManager creates a clipboard manager.
 func NewManager(conn *network.Conn, display string) *Manager {
-	return &Manager{
+	m := &Manager{
 		conn:    conn,
 		display: display,
 		stopCh:  make(chan struct{}),
 	}
+	m.stageRoot = defaultStageRoot()
+	m.setFileClipboard = m.setLocalFileClipboard
+	return m
 }
 
 // Start begins monitoring the local clipboard for changes.
 func (m *Manager) Start() {
+	// A connection/restart is not a clipboard change. Baseline the selection
+	// already owned by Linux so it is not pushed to Windows as if the user had
+	// just copied it. Only changes observed after Start are transmitted.
+	m.seedLocalClipboardHash()
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -90,17 +109,115 @@ func (m *Manager) Stop() {
 func (m *Manager) HandlePacket(pkt *protocol.Packet) {
 	switch pkt.Type {
 	case protocol.ClipboardText, protocol.ClipboardImage:
+		m.clearPendingRemoteClipboard()
 		m.handleChunk(pkt)
 	case protocol.ClipboardDataEnd:
 		m.handleEnd(pkt)
 	case protocol.Clipboard:
-		slog.Debug("clipboard beat received from remote")
+		m.rememberRemoteClipboard(pkt)
 	case protocol.ClipboardAsk:
 		slog.Debug("clipboard ask received — sending current clipboard")
 		go m.sendClipboard()
 	default:
 		slog.Debug("unhandled clipboard packet", "type", pkt.Type)
 	}
+}
+
+// rememberRemoteClipboard records MWB's clipboard beat without pulling it yet.
+//
+// PowerToys sends a beat only when the clipboard content is not already sent
+// inline: usually a copied file or text/image larger than its inline threshold.
+// Official MWB does not answer here. It remembers the source for 30 seconds and
+// asks only when the cursor switches to the receiving machine.
+func (m *Manager) rememberRemoteClipboard(beat *protocol.Packet) {
+	remoteID := beat.Src
+	if remoteID == 0 && m.conn != nil {
+		remoteID = m.conn.RemoteID
+	}
+	if remoteID == 0 {
+		slog.Warn("clipboard beat has no resolvable source")
+		return
+	}
+
+	m.mu.Lock()
+	m.pendingPull = remoteID
+	m.pendingAt = time.Now()
+	m.mu.Unlock()
+	slog.Info("remote clipboard waiting for Linux activation", "remoteID", remoteID)
+}
+
+// HandleActivation pulls the pending remote clipboard when the cursor arrives
+// on Linux. This is the same trigger PowerToys uses for large clipboard data.
+func (m *Manager) HandleActivation() {
+	m.mu.Lock()
+	remoteID := m.pendingPull
+	pendingAt := m.pendingAt
+	m.pendingPull = 0
+	m.pendingAt = time.Time{}
+	m.mu.Unlock()
+
+	if remoteID == 0 {
+		return
+	}
+	if time.Since(pendingAt) > remoteClipboardTimeout {
+		slog.Debug("pending remote clipboard expired", "remoteID", remoteID)
+		return
+	}
+	if m.conn == nil {
+		slog.Warn("cannot request remote clipboard without a control connection")
+		return
+	}
+
+	ask := &protocol.Packet{
+		Type:       protocol.ClipboardAsk,
+		Src:        m.conn.MachineID,
+		Des:        remoteID,
+		PostAction: protocol.PostActionOther,
+	}
+	ask.SetMachineName(m.conn.LocalName)
+	if err := m.conn.SendPacket(ask); err != nil {
+		slog.Error("request remote clipboard failed", "remoteID", remoteID, "err", err)
+		return
+	}
+	slog.Info("requested remote clipboard over file channel", "remoteID", remoteID)
+}
+
+func (m *Manager) clearPendingRemoteClipboard() {
+	m.mu.Lock()
+	m.pendingPull = 0
+	m.pendingAt = time.Time{}
+	m.mu.Unlock()
+}
+
+// seedLocalClipboardHash records the current selection without sending it.
+// PowerToys reacts to clipboard-change events, not whatever happened to be on
+// a peer's clipboard when a TCP connection was established.
+func (m *Manager) seedLocalClipboardHash() {
+	var hash string
+	if m.OnFileCopy != nil {
+		if paths := m.getLocalFileClipboard(); len(paths) > 0 {
+			hash = "file:" + strings.Join(paths, "\x00")
+		}
+	}
+	if hash == "" {
+		if imgData := m.getLocalImageClipboard(); imgData != nil {
+			hash = fmt.Sprintf("img:%d", len(imgData))
+		}
+	}
+	if hash == "" {
+		if text := m.getLocalClipboard(); text != "" {
+			hash = fmt.Sprintf("%d:%s", len(text), text[:min(100, len(text))])
+		}
+	}
+
+	m.mu.Lock()
+	// Incoming clipboard data cannot normally race Start (the receive loop has
+	// not begun), but do not overwrite it if a caller uses Manager differently.
+	if m.lastHash == "" {
+		m.lastHash = hash
+	}
+	m.mu.Unlock()
+	slog.Debug("initial Linux clipboard baselined", "hasContent", hash != "")
 }
 
 // pollClipboard monitors the local clipboard for changes.
@@ -289,6 +406,25 @@ func (m *Manager) handleEnd(pkt *protocol.Packet) {
 	if len(data) == 0 {
 		return
 	}
+	m.handleRemoteData(data, isImage)
+}
+
+// HandleFileChannelPayload applies oversized text/image content received over
+// the file channel. PowerToys uses the same compressed-text and raw-image
+// formats as the control channel; only the transport differs.
+func (m *Manager) HandleFileChannelPayload(name string, data []byte) {
+	lower := strings.ToLower(name)
+	switch {
+	case strings.HasPrefix(lower, "image"):
+		m.handleRemoteData(data, true)
+	case strings.HasPrefix(lower, "text"):
+		m.handleRemoteData(data, false)
+	default:
+		slog.Warn("unknown inline clipboard payload", "name", name, "bytes", len(data))
+	}
+}
+
+func (m *Manager) handleRemoteData(data []byte, isImage bool) {
 
 	if isImage {
 		// Try decompress first, fall back to raw data

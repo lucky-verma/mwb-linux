@@ -26,9 +26,13 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// The file channel shares the control port and is told apart only by its first
-// packet. This drives the whole inbound branch end to end: dial, IV exchange,
-// Clipboard header packet, file header, body, and the write to disk.
+func staticMachineID(id uint32) func() uint32 {
+	return func() uint32 { return id }
+}
+
+// The file channel uses the base/clipboard port. This drives the whole inbound
+// branch end to end: dial, IV exchange, raw Clipboard header, file header,
+// body, and the write to disk.
 func TestFileChannel_EndToEnd(t *testing.T) {
 	port := freePort(t)
 	dir := t.TempDir()
@@ -49,7 +53,7 @@ func TestFileChannel_EndToEnd(t *testing.T) {
 		gotPath = res.Path
 	}
 
-	if _, err := ListenAndAccept(port, testKey, "listener", "127.0.0.1", onFile, stop); err != nil {
+	if err := ListenFileChannel(port, testKey, "listener", "127.0.0.1", staticMachineID(77), onFile, stop); err != nil {
 		t.Fatal(err)
 	}
 	defer close(stop)
@@ -68,7 +72,7 @@ func TestFileChannel_EndToEnd(t *testing.T) {
 	if err := filetransfer.Send(conn.Writer(), src, filetransfer.DefaultMaxSize); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	_ = conn.Close()
+	_ = conn.raw.Close()
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()

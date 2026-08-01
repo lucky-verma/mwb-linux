@@ -37,6 +37,25 @@ const (
 	Error                PackageType = 0xFE
 )
 
+// ClipboardPostAction tells the peer what to do with a file it receives. MWB
+// overlays it on the payload union at offset 16, reads it back out of the
+// opening packet of a file channel (`postAction = package.PostAction`), and
+// stringifies it to pick a destination:
+//
+//	Desktop — <Desktop>\MouseWithoutBorders\<name>
+//	Other   — <Desktop>\<BinaryName>\ScreenCaptures\<name>
+//
+// Neither directly selects Downloads. Other is MWB's normal copy/paste mode:
+// it stages the file in its private storage and places that staged file on the
+// Windows clipboard, so Ctrl+V can paste it into any chosen folder. Desktop is
+// the special auto-save mode under Desktop\MouseWithoutBorders.
+type ClipboardPostAction uint32
+
+const (
+	PostActionOther   ClipboardPostAction = 0
+	PostActionDesktop ClipboardPostAction = 1
+)
+
 const (
 	PacketSize   = 32
 	PacketSizeEx = 64

@@ -31,10 +31,14 @@ type ClipboardHandler interface {
 
 // Handler processes incoming MWB packets and injects input events.
 type Handler struct {
-	Mouse       MouseDevice
-	Keyboard    KeyboardDevice
-	Clipboard   ClipboardHandler // optional clipboard handler
-	OnActivated func()           // called when remote sends MachineSwitched
+	Mouse     MouseDevice
+	Keyboard  KeyboardDevice
+	Clipboard ClipboardHandler // optional clipboard handler
+	// OnBecameActive is called for either accepted activation packet. MWB can
+	// return the cursor with MachineSwitched or NextMachine depending on screen
+	// topology and connection direction; clipboard activation needs both.
+	OnBecameActive func()
+	OnActivated    func() // called when remote sends MachineSwitched
 	// ShouldActivate optionally rejects MachineSwitched packets from the wrong edge.
 	ShouldActivate func() bool
 	OnReclaimed    func() // called when server sends NextMachine from the shared edge
@@ -78,6 +82,9 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		now := time.Now()
 		h.ActivatedAt = &now
 		h.inSeeded = false // reseed inbound tracker so the entry move snaps, not scales
+		if h.OnBecameActive != nil {
+			h.OnBecameActive()
+		}
 		if h.OnActivated != nil {
 			h.OnActivated()
 		}
@@ -93,6 +100,9 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 			"src", pkt.Src, "des", pkt.Des, "targetID", pkt.Mouse.WheelDelta,
 			"requestX", pkt.Mouse.X, "requestY", pkt.Mouse.Y)
 		// Server's cursor hit the edge shared with us — reclaim local control.
+		if h.OnBecameActive != nil {
+			h.OnBecameActive()
+		}
 		if h.OnReclaimed != nil {
 			h.OnReclaimed()
 		}

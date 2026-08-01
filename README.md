@@ -205,7 +205,7 @@ MWB Linux implements the full Mouse Without Borders protocol:
 5. **Input forwarding** — Mouse (absolute coords) and keyboard (VK codes) sent as MWB packets
 6. **Device isolation** — exclusive `EVIOCGRAB` kernel grabs on local keyboards and pointers prevent dual cursor movement during remote control. The grab is owned by the file descriptor, so the kernel restores local input automatically if mwb exits, crashes or is killed
 7. **Clipboard** — Bidirectional text/image sync via compressed clipboard packets
-8. **File copy** — Copy a file on one machine, paste on the other. Files travel over a second connection to the same port, not the clipboard packet stream, matching how MWB does it
+8. **File copy** — Copy one file, switch to the other machine, and paste it into the folder you choose. In both directions the receiver stages the file privately on its clipboard; a copy alone never creates a visible destination file. Bytes travel over a second connection on the clipboard port (base; control is base+1), matching PowerToys MWB
 
 For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -254,8 +254,8 @@ keep the client on a trusted network segment.
 | `clipboard` | true | Clipboard sync: set `false` to disable text/image sharing |
 | `accel_multiplier` | 2.0 | Cursor speed when controlling Windows. Lower it (e.g. `1.0`, `0.5`) if the Windows cursor feels too fast |
 | `inbound_multiplier` | 1.0 | Cursor speed when Windows controls Linux. `1.0` mirrors Windows exactly; raise it for faster inbound movement |
-| `file_transfer` | true | Enable the MWB file copy channel |
-| `file_dir` | ~/Downloads/mwb | Where received files are written |
+| `file_transfer` | true | Enable the MWB file copy channel. Keep `clipboard = true`: clipboard events trigger transfers in both directions |
+| `file_dir` | — | Deprecated and ignored. Windows files use hidden clipboard backing storage under `$XDG_CACHE_HOME/mwb/clipboard` and a native GNOME/generic file selection, then appear in a visible folder only on paste |
 | `max_file_size` | 104857600 | Per-transfer cap in bytes. The default matches MWB's own 100 MB limit; a stock Windows peer neither sends nor accepts more |
 | `keyboard_layout` | auto | Inbound Windows-to-Linux keyboard mapping. `auto` detects the local Linux layout when possible; supported profiles include `us`, `de`, `fr`, `be`, `es`, `it`, `gb`, `pt`, `no`/`dk`/`se`/`fi`, `ch`, and `nl` |
 

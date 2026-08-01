@@ -5,13 +5,18 @@ package clipboard
 import (
 	"context"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 )
 
 // fileURIPrefix is the only scheme worth acting on. A copy from a remote
 // filesystem view can offer other schemes, which MWB does not transfer either.
-const fileURIPrefix = "file://"
+const (
+	fileURIPrefix   = "file://"
+	uriListTarget   = "text/uri-list"
+	gnomeFileTarget = "x-special/gnome-copied-files"
+)
 
 // getLocalFileClipboard returns local paths when the X clipboard holds a file
 // selection, and nil otherwise.
@@ -23,18 +28,38 @@ const fileURIPrefix = "file://"
 func (m *Manager) getLocalFileClipboard() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
 	defer cancel()
-	targets, err := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o").Output()
-	if err != nil || !strings.Contains(string(targets), "text/uri-list") {
+	targetCmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
+	targetCmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+	targets, err := targetCmd.Output()
+	if err != nil {
+		return nil
+	}
+	target := clipboardFileTarget(string(targets))
+	if target == "" {
 		return nil
 	}
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
 	defer cancel2()
-	out, err := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-o").Output()
+	readCmd := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", target, "-o")
+	readCmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+	out, err := readCmd.Output()
 	if err != nil {
 		return nil
 	}
 	return parseFileURIs(string(out))
+}
+
+func clipboardFileTarget(targets string) string {
+	// GNOME's target includes whether the operation is copy or cut and is what
+	// Nautilus consumes for Ctrl+V. Prefer it when both are offered.
+	if strings.Contains(targets, gnomeFileTarget) {
+		return gnomeFileTarget
+	}
+	if strings.Contains(targets, uriListTarget) {
+		return uriListTarget
+	}
+	return ""
 }
 
 // parseFileURIs extracts local filesystem paths from a text/uri-list payload.

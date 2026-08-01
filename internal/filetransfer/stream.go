@@ -105,29 +105,48 @@ func Receive(r io.Reader, dir string, maxSize int64) (*Result, error) {
 	return &Result{Path: final, Name: filepath.Base(final), Size: written}, nil
 }
 
-// Send writes one file to an already-encrypted stream.
-func Send(w io.Writer, path string, maxSize int64) error {
+// Sendable reports the size of a file that may be sent, rejecting everything
+// MWB does not transfer: directories, non-regular files, and content past the
+// cap.
+//
+// Exported separately from Send so a caller can reject a selection before
+// opening a connection. A folder copy should not cost the peer a file channel
+// that it only ever sees abandoned.
+func Sendable(path string, maxSize int64) (int64, error) {
 	if maxSize <= 0 {
 		maxSize = DefaultMaxSize
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("stat %s: %w", path, err)
+		return 0, fmt.Errorf("stat %s: %w", path, err)
 	}
 	if info.IsDir() {
 		// MWB does not transfer directories either; the documented workaround
 		// is to zip them first.
-		return fmt.Errorf("%w: %s is a directory", ErrUnsafeName, path)
+		return 0, fmt.Errorf("%w: %s is a directory", ErrUnsafeName, path)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: %s is not a regular file", ErrUnsafeName, path)
+		return 0, fmt.Errorf("%w: %s is not a regular file", ErrUnsafeName, path)
 	}
 	if info.Size() > maxSize {
-		return fmt.Errorf("%w: %s is %d bytes, limit is %d", ErrSizeRejected, path, info.Size(), maxSize)
+		return 0, fmt.Errorf("%w: %s is %d bytes, limit is %d", ErrSizeRejected, path, info.Size(), maxSize)
+	}
+	return info.Size(), nil
+}
+
+// Send writes one file to an already-encrypted stream.
+//
+// The size is re-read here rather than taken from the caller: an early
+// Sendable check is a gate, not a guarantee, and the file may have changed
+// between the two.
+func Send(w io.Writer, path string, maxSize int64) error {
+	size, err := Sendable(path, maxSize)
+	if err != nil {
+		return err
 	}
 
-	hdr, err := EncodeHeader(Header{Size: info.Size(), Name: filepath.Base(path)})
+	hdr, err := EncodeHeader(Header{Size: size, Name: filepath.Base(path)})
 	if err != nil {
 		return err
 	}
@@ -144,12 +163,12 @@ func Send(w io.Writer, path string, maxSize int64) error {
 
 	// Bound the copy by the size already announced. A file growing mid-transfer
 	// must not desynchronise the peer, which stops reading at the declared size.
-	sent, err := writeAligned(w, f, info.Size())
+	sent, err := writeAligned(w, f, size)
 	if err != nil {
 		return fmt.Errorf("send body: %w", err)
 	}
-	if sent != info.Size() {
-		return fmt.Errorf("%w: sent %d of %d bytes", ErrShortBody, sent, info.Size())
+	if sent != size {
+		return fmt.Errorf("%w: sent %d of %d bytes", ErrShortBody, sent, size)
 	}
 
 	slog.Info("sent file", "path", path, "bytes", sent)

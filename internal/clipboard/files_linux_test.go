@@ -39,3 +39,13 @@ func TestParseFileURIs(t *testing.T) {
 		})
 	}
 }
+
+func TestClipboardFileTargetPrefersGNOME(t *testing.T) {
+	targets := "TARGETS\ntext/uri-list\nx-special/gnome-copied-files\n"
+	if got := clipboardFileTarget(targets); got != gnomeFileTarget {
+		t.Fatalf("target = %q, want %q", got, gnomeFileTarget)
+	}
+	if got := clipboardFileTarget("TARGETS\ntext/uri-list\n"); got != uriListTarget {
+		t.Fatalf("fallback target = %q, want %q", got, uriListTarget)
+	}
+}

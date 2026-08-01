@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,6 +26,11 @@ import (
 // version is stamped at release time via -ldflags "-X main.version=...".
 // Builds made outside the release pipeline report "dev".
 var version = "dev"
+
+// fileDialTimeout bounds connection setup for an outbound file copy. It matches
+// the control connection's dial timeout: the file channel reaches the same
+// peer on its adjacent clipboard port, so a reachable peer answers promptly.
+const fileDialTimeout = 10 * time.Second
 
 // runSubcommand handles the verb form (`mwb update`, `mwb version`) and reports
 // whether it consumed the invocation. Subcommands are dispatched before
@@ -139,27 +145,28 @@ func main() {
 		KeyboardLayout:    keyboardLayout,
 	}
 
-	// File transfer shares the control port: MWB opens a second connection there
-	// for file copies. A nil handler leaves those connections rejected.
+	// File transfer runs on its own connection. A nil handler leaves inbound
+	// file connections rejected and stops the clipboard from offering to send.
+	var activeClip atomic.Pointer[clipboard.Manager]
+	var activeMachineID atomic.Uint32
 	var onFile network.InboundFile
 	if cfg.FileTransferEnabled() {
-		fileDir := cfg.FileDirectory()
 		maxFile := cfg.MaxFileSize
-		slog.Info("file transfer enabled", "dir", fileDir, "max_bytes", filetransfer.EffectiveMaxSize(maxFile))
+		slog.Info("file transfer enabled", "mode", "clipboard staging", "max_bytes", filetransfer.EffectiveMaxSize(maxFile))
 		onFile = func(c *network.Conn, push bool) {
-			res, err := filetransfer.Receive(c.Reader(), fileDir, maxFile)
+			if !push {
+				slog.Warn("peer opened a pull file channel, but no outbound clipboard was requested")
+				return
+			}
+			clipMgr := activeClip.Load()
+			if clipMgr == nil {
+				slog.Warn("rejecting inbound clipboard payload: clipboard manager unavailable")
+				return
+			}
+			_, err := clipMgr.HandleFileChannel(c.Reader(), maxFile)
 			if err != nil {
 				slog.Error("inbound file transfer failed", "err", err)
-				return
 			}
-			if res.Path == "" {
-				// Oversized clipboard payload rather than a file; the clipboard
-				// manager owns that content, not the filesystem.
-				slog.Info("received inline clipboard payload over the file channel",
-					"name", res.Name, "bytes", res.Size)
-				return
-			}
-			filetransfer.Notify(res)
 		}
 	}
 
@@ -176,6 +183,15 @@ func main() {
 		os.Exit(1)
 	}
 	defer close(serverStop)
+
+	// Inbound file transfers arrive on the clipboard port, not the control one.
+	// MWB dials skClipboardServer for them, so a client that only listens on
+	// the control port is never offered a file.
+	if onFile != nil {
+		if err := network.ListenFileChannel(cfg.ClipboardPort(), cfg.Key, cfg.Name, cfg.Host, activeMachineID.Load, onFile, serverStop); err != nil {
+			slog.Error("inbound file transfers disabled", "port", cfg.ClipboardPort(), "err", err)
+		}
+	}
 
 	go func() {
 		for {
@@ -202,13 +218,42 @@ func main() {
 				slog.Info("connected (inbound)", "remote", conn.RemoteName)
 			}
 			close(connectStop)
+			activeMachineID.Store(conn.MachineID)
+			handler.OnBecameActive = nil
+			handler.OnActivated = nil
+			handler.OnReclaimed = nil
 
 			// Start clipboard sharing on the auto-detected display unless disabled.
 			var clipMgr *clipboard.Manager
 			if clipboardEnabled {
 				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay())
+				if cfg.FileTransferEnabled() {
+					// A copied file is what the clipboard poll notices, but the
+					// bytes travel over their own connection rather than the
+					// clipboard packet stream.
+					sender := network.FileSender{
+						// The clipboard port, not addr: that one is the
+						// control channel and MWB answers it with a Handshake.
+						Addr:        fmt.Sprintf("%s:%d", cfg.Host, cfg.ClipboardPort()),
+						SecurityKey: cfg.Key,
+						MachineName: cfg.Name,
+						MachineID:   conn.MachineID,
+						MaxSize:     cfg.MaxFileSize,
+						DialTimeout: fileDialTimeout,
+					}
+					clipMgr.OnFileCopy = func(paths []string) {
+						if err := sender.Send(paths); err != nil {
+							slog.Error("outbound file copy failed", "err", err)
+						}
+					}
+				}
 				handler.Clipboard = clipMgr
+				activeClip.Store(clipMgr)
 				clipMgr.Start()
+				// PowerToys delays large/file clipboard retrieval until the cursor
+				// switches to the receiving machine. Do the same on Linux instead
+				// of downloading every Windows copy immediately.
+				handler.OnBecameActive = clipMgr.HandleActivation
 			}
 
 			// Start bidirectional capture if enabled
@@ -218,6 +263,12 @@ func main() {
 				slog.Info("screen detected", "width", screen.Width, "height", screen.Height)
 
 				cap = capture.New(conn, screen, *edgeSide)
+				if clipMgr != nil {
+					// Capturer can return the cursor locally when its virtual remote
+					// position reaches the shared edge; no network activation packet
+					// exists on that path, so it must notify the clipboard directly.
+					cap.OnActivated = clipMgr.HandleActivation
+				}
 				// Wire remote screen dimensions from config so virtual cursor
 				// coordinate mapping is correct for non-1080p Windows displays.
 				cap.SetRemoteScreen(int32(cfg.RemoteWidth), int32(cfg.RemoteHeight))
@@ -276,8 +327,10 @@ func main() {
 			}
 
 			if clipMgr != nil {
+				activeClip.CompareAndSwap(clipMgr, nil)
 				clipMgr.Stop() // waits for goroutine via WaitGroup
 			}
+			activeMachineID.CompareAndSwap(conn.MachineID, 0)
 
 			_ = conn.Close()
 			slog.Info("disconnected, will reconnect in 100ms")
