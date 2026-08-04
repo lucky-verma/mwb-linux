@@ -98,6 +98,32 @@ func TestHandleFileChannelPublishFailureLeavesNoNewFile(t *testing.T) {
 	}
 }
 
+func TestHandleFileChannelPeerErrorLeavesClipboardUntouched(t *testing.T) {
+	m := NewManager(nil, "")
+	m.stageRoot = filepath.Join(t.TempDir(), "clipboard")
+	published := false
+	m.setFileClipboard = func(string) error {
+		published = true
+		return nil
+	}
+
+	name := `C:\Downloads\large.exe - File too big (greater than 100MB), please drag and drop the file instead!`
+	_, err := m.HandleFileChannel(bytes.NewReader(fileChannelPayload(t, name, nil)), 0)
+	if !errors.Is(err, filetransfer.ErrPeerRejected) {
+		t.Fatalf("err = %v, want ErrPeerRejected", err)
+	}
+	if published {
+		t.Fatal("peer error was published to the Linux clipboard")
+	}
+	entries, readErr := os.ReadDir(m.stageRoot)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("peer error left %d staged entries", len(entries))
+	}
+}
+
 func TestFileClipboardPayloadEscapesPath(t *testing.T) {
 	got := fileClipboardPayload("/tmp/a b#c.txt", uriListTarget)
 	if got != "file:///tmp/a%20b%23c.txt\r\n" {

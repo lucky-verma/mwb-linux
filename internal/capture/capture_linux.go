@@ -77,6 +77,7 @@ type Capturer struct {
 	grabMu        sync.Mutex                 // serializes isolation changes; never held with mu
 	setGrabFn     func(*os.File, bool) error // test seam; nil uses the real ioctl
 	findDevicesFn func() ([]string, error)   // test seam; nil scans /dev/input
+	pointer       pointerPositioner          // one persistent X11 connection for edge polling
 	stopCh        chan struct{}
 	wg            sync.WaitGroup            // tracks all goroutines for clean Stop()
 	devices       map[string]*trackedDevice // open /dev/input/event* fds, keyed by path
@@ -269,15 +270,28 @@ func (c *Capturer) Stop() {
 	}
 	c.devices = nil
 	c.mu.Unlock()
+	if c.pointer != nil {
+		c.pointer.Close()
+	}
 	c.wg.Wait()
 }
 
 // Run starts edge detection polling and evdev monitoring.
 // Validates all preconditions before starting any goroutines.
 func (c *Capturer) Run() error {
-	devices, err := findInputDevices()
+	discover := c.findDevicesFn
+	if discover == nil {
+		discover = findInputDevices
+	}
+	devices, err := discover()
 	if err != nil {
 		return fmt.Errorf("find input devices: %w", err)
+	}
+	if c.pointer == nil {
+		c.pointer, err = newX11Pointer(getDisplay())
+		if err != nil {
+			return fmt.Errorf("connect to X11 for cursor position: %w", err)
+		}
 	}
 	slog.Info("found input devices", "count", len(devices))
 
@@ -418,11 +432,11 @@ func (c *Capturer) pollCursorEdge() {
 			c.mu.Lock()
 			// canSwitch gate handles loop prevention — no time-based cooldown needed
 			c.mu.Unlock()
-			x, y, err := getCursorPosition()
+			x, y, err := c.pointer.Position()
 			if err != nil {
 				errCount++
 				if errCount <= 3 {
-					slog.Warn("getCursorPosition failed", "err", err, "count", errCount)
+					slog.Warn("cursor position query failed", "err", err, "count", errCount)
 				}
 				continue
 			}
@@ -648,23 +662,6 @@ func detectAndSetXauthority(display string) {
 			}
 		}
 	}
-}
-
-func getCursorPosition() (x, y int32, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "xdotool", "getmouselocation")
-	cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-	out, err := cmd.Output()
-	if err != nil {
-		return -1, -1, fmt.Errorf("xdotool: %w", err)
-	}
-	var ix, iy int
-	if _, err = fmt.Sscanf(string(out), "x:%d y:%d", &ix, &iy); err != nil {
-		// Return sentinel -1,-1 to distinguish parse failure from cursor at origin (0,0)
-		return -1, -1, fmt.Errorf("xdotool parse: %w", err)
-	}
-	return int32(ix), int32(iy), nil
 }
 
 // applyIsolation brings the kernel grabs in line with who currently owns the

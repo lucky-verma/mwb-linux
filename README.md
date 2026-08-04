@@ -144,19 +144,26 @@ dependency and permission steps from [From Binary](#from-binary) first
 ```bash
 mwb update --check   # see what's available
 mwb update           # download, verify and install
+mwb update --restart # install and restart an active user service
 ```
 
 `mwb update` fetches the release artifact for your architecture, verifies it
 against the SHA-256 published in that release's `checksums.txt`, and replaces
 the binary atomically — an interrupted update leaves either the old binary or
 the new one, never a broken one. It refuses to install anything whose checksum
-does not match, and only ever downloads from GitHub.
+does not match, and only ever downloads from GitHub. Before replacement it
+creates a versioned hard-link backup beside the binary, without overwriting an
+existing backup.
+
+A source build reports version `dev`, which cannot be ordered against a release.
+The updater therefore refuses to replace it unless `--force` is supplied.
 
 If mwb was installed from the `.deb`, `mwb update` will not overwrite it behind
 dpkg's back; it prints the `apt` command to use instead. If the binary lives
 somewhere only root can write, it tells you to re-run with `sudo`.
 
-The running service keeps using the old binary until it is restarted:
+The running service keeps using the old binary until it is restarted. Pass
+`--restart` to do that after a successful update, or restart it separately:
 
 ```bash
 systemctl --user restart mwb.service
@@ -274,6 +281,7 @@ keep the client on a trusted network segment.
 | `mwb update` | Download and install the latest release |
 | `mwb update --check` | Report whether an update exists, without installing |
 | `mwb update --force` | Reinstall the latest release even if already current |
+| `mwb update --restart` | Install and restart an active `mwb.service` |
 
 ### CLI Flags
 
@@ -356,7 +364,7 @@ scripts/
 - **Keyboard on Windows lock screen** — Keyboard input may not work on the Windows lock screen (Winlogon desktop security restriction)
 - **Middle mouse button auto-scroll** — Middle-click auto-scroll (scroll lock mode) does not work in browsers; normal middle-click works
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
-- **Bidirectional mode requires X11** — Edge detection uses `xdotool`. (Device isolation itself is display-server agnostic: `EVIOCGRAB` works identically on X11, Wayland and the console.) Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
+- **Bidirectional mode requires X11** — Edge detection queries the X11 server directly; `xdotool` is retained for the infrequent cursor recenter operation. (Device isolation itself is display-server agnostic: `EVIOCGRAB` works identically on X11, Wayland and the console.) Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
 - **Keyboard layout metadata** — PowerToys MWB keyboard packets carry Windows virtual-key codes and flags, but not hardware scan codes or Unicode text. MWB Linux uses `keyboard_layout` profiles for common layouts; unsupported profiles fall back to the original US-compatible mapping. Fully zero-config global layout support requires sender-side scan code or Unicode metadata.
 - **File copy is one file at a time** — Matching MWB itself, folders and
   multi-file selections are not transferred; zip them first. The 100 MB default

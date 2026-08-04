@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-03
+
+### Added
+- `mwb update --restart` restarts an active user service after a successful
+  install.
+
+### Changed
+- Cursor edge polling now uses one persistent X11 connection instead of
+  spawning `xdotool getmouselocation` every 10 ms. `xdotool` remains only for
+  the infrequent cursor recenter operation.
+- `mwb update` creates a versioned hard-link backup beside the running binary
+  before replacement and refuses to replace an unversioned source build unless
+  `--force` is explicit.
+
+### Fixed
+- Known PowerToys zero-byte file-transfer error headers are rejected before any
+  staged file or clipboard entry is created. Legitimate empty files
+  remain supported, and rejected transfers cannot be copied back to Windows as
+  fake files.
+
 ## [0.6.1] - 2026-08-01
 
 ### Fixed
@@ -373,7 +393,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.0...v0.5.1

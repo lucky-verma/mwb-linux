@@ -25,6 +25,7 @@ type Options struct {
 	CurrentVersion string
 	CheckOnly      bool
 	Force          bool // reinstall even when already up to date
+	Restart        bool // restart mwb.service after a successful install
 	Out            io.Writer
 }
 
@@ -46,12 +47,19 @@ func Run(ctx context.Context, opts Options) error {
 	say("installed: %s\nlatest:    %s\n", displayVersion(opts.CurrentVersion), rel.Version)
 
 	upgradable := IsNewer(opts.CurrentVersion, rel.Version)
-	if !upgradable && !opts.Force {
-		say("\nAlready up to date.\n")
+	if opts.CheckOnly {
+		if upgradable {
+			say("\nAn update is available. Run `mwb update` to install it.\n")
+		} else {
+			say("\nAlready up to date.\n")
+		}
 		return nil
 	}
-	if opts.CheckOnly {
-		say("\nAn update is available. Run `mwb update` to install it.\n")
+	if err := validateInstallVersion(opts.CurrentVersion, opts.Force); err != nil {
+		return err
+	}
+	if !upgradable && !opts.Force {
+		say("\nAlready up to date.\n")
 		return nil
 	}
 
@@ -119,19 +127,66 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	say("Checksum verified (%s…).\n", want[:16])
 
+	backup, err := backupBinary(exePath, opts.CurrentVersion)
+	if err != nil {
+		return err
+	}
+	say("Backed up current binary to %s\n", backup)
+
 	if err := replaceBinary(exePath, data, info.Mode().Perm()); err != nil {
 		return err
 	}
 	say("\nInstalled %s to %s\n", rel.Version, exePath)
 
-	// The old binary keeps running until the service is restarted.
-	if unit, running := runningUnit(ctx); running {
+	// The old inode keeps running until the service is restarted.
+	if unit, running := runningUnit(ctx); running && opts.Restart {
+		say("Restarting %s…\n", unit)
+		if err := restartUnit(ctx, unit); err != nil {
+			return fmt.Errorf("installed %s, but restart failed: %w", rel.Version, err)
+		}
+		say("Restarted %s.\n", unit)
+	} else if running {
 		say("\nThe running service is still on the previous version. Restart it with:\n\n")
 		say("    systemctl --user restart %s\n", unit)
 	} else {
 		say("\nRestart any running mwb process to pick up the new version.\n")
 	}
 	return nil
+}
+
+// validateInstallVersion prevents a source build from being silently replaced
+// by the newest release. A source build has no comparable semantic version, so
+// replacement must be an explicit --force choice.
+func validateInstallVersion(current string, force bool) error {
+	if _, ok := ParseVersion(current); !ok && !force {
+		return fmt.Errorf("refusing to replace %s without --force", displayVersion(current))
+	}
+	return nil
+}
+
+const maxBackupAttempts = 100
+
+// backupBinary preserves the exact inode about to be replaced. Hard-linking in
+// the same directory is atomic, consumes no duplicate file data, and keeps the
+// rollback usable after replaceBinary renames a new inode over dest.
+func backupBinary(dest, currentVersion string) (string, error) {
+	label := "dev"
+	if parts, ok := ParseVersion(currentVersion); ok {
+		label = fmt.Sprintf("%d.%d.%d", parts[0], parts[1], parts[2])
+	}
+	base := fmt.Sprintf("%s-%s.bak", dest, label)
+	for i := 0; i < maxBackupAttempts; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s.%d", base, i)
+		}
+		if err := os.Link(dest, candidate); err == nil {
+			return candidate, nil
+		} else if !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("back up current binary: %w", err)
+		}
+	}
+	return "", fmt.Errorf("back up current binary: %d backup names already exist", maxBackupAttempts)
 }
 
 func displayVersion(v string) string {
@@ -201,4 +256,22 @@ func runningUnit(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	return unitName, true
+}
+
+func restartUnit(ctx context.Context, unit string) error {
+	systemctl, err := exec.LookPath("systemctl")
+	if err != nil {
+		return fmt.Errorf("find systemctl: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, systemctl, "--user", "restart", unit).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message != "" {
+			return fmt.Errorf("systemctl: %s: %w", message, err)
+		}
+		return fmt.Errorf("systemctl: %w", err)
+	}
+	return nil
 }

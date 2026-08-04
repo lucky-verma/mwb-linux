@@ -123,6 +123,7 @@ The sender is a remote machine, so the header is hostile input.
 | Destination re-checked after `EvalSymlinks` | a symlinked destination directory cannot redirect the write |
 | Mode `0600`, never executable | remote content must not arrive runnable |
 | Declared size capped before receive; aligned reader writes exactly that size | a peer that under-declares its size cannot overrun the cap |
+| Known zero-byte PowerToys error headers rejected before file creation | peer refusal text cannot become a fake clipboard file; ordinary empty files remain valid |
 | Inline buffer never sized from the declared size | otherwise a peer forces a large allocation while sending nothing |
 | Free space checked after the directory exists | `statfs` on a missing path fails and would pass by default |
 | `.part` then rename | an interrupted transfer never leaves a file that looks whole |

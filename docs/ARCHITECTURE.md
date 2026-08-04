@@ -285,7 +285,7 @@ mwb -bidi -edge left -debug
 
 ### Linux Side
 - `/dev/uinput` accessible (user in `input` group)
-- `xdotool` installed (for cursor position polling)
+- `xdotool` installed (for infrequent cursor recentering)
 - `xrandr` installed (for screen detection)
 - Configure the udev/input-group access from the installer; avoid `sudo mwb`
   for normal use because it reads root's config and can miss the user's
@@ -416,6 +416,7 @@ all writes.
 - [ ] File drag-and-drop
 - [ ] Multi-monitor support
 - [ ] Wayland native support (replace xdotool with compositor protocol)
-- [ ] Replace xdotool polling with XInput2 RawMotion events (100 forks/sec → 0)
+- [ ] Consider event-driven XInput2 edge detection if the persistent X11
+      `QueryPointer` polling becomes measurable
 - [ ] Virtual cursor drift correction (wire UpdateRemoteScreen to incoming abs coords)
 - [ ] Smoother cursor transition animations

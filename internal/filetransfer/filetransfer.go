@@ -51,6 +51,9 @@ var (
 	ErrSizeRejected = errors.New("declared file size rejected")
 	// ErrShortBody means the peer closed before sending the declared bytes.
 	ErrShortBody = errors.New("file body shorter than declared size")
+	// ErrPeerRejected means PowerToys sent a zero-byte status header instead of
+	// a file. These headers are protocol errors, not valid clipboard files.
+	ErrPeerRejected = errors.New("peer refused file transfer")
 )
 
 // Header describes one incoming or outgoing file.
@@ -139,6 +142,29 @@ func ParseHeader(buf []byte, maxSize int64) (Header, error) {
 func IsInlinePayload(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.HasPrefix(lower, "text") || strings.HasPrefix(lower, "image")
+}
+
+// peerTransferError recognises the status headers emitted by PowerToys when a
+// clipboard file cannot be transferred. PowerToys puts the explanation in the
+// filename field and declares a zero-byte body; accepting that as a file turns
+// the error sentence into a real clipboard item.
+//
+// Size is part of the signature deliberately. Empty files are valid and must
+// continue to round-trip unless their names match an exact PowerToys status.
+func peerTransferError(h Header) error {
+	if h.Size != 0 {
+		return nil
+	}
+	for _, suffix := range [...]string{
+		" - File too big (greater than 100MB), please drag and drop the file instead!",
+		" - Folder is not supported, zip it first!",
+		" not found!",
+	} {
+		if strings.HasSuffix(h.Name, suffix) {
+			return fmt.Errorf("%w: %s", ErrPeerRejected, h.Name)
+		}
+	}
+	return nil
 }
 
 // readFull reads exactly len(buf) bytes, mapping a short read to a named error.

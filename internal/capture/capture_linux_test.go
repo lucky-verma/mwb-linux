@@ -3,9 +3,55 @@
 package capture
 
 import (
+	"errors"
+	"sync"
 	"testing"
 	"time"
 )
+
+type blockingPointer struct {
+	started   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func (p *blockingPointer) Position() (int32, int32, error) {
+	p.startOnce.Do(func() { close(p.started) })
+	<-p.closed
+	return -1, -1, errors.New("pointer closed")
+}
+
+func (p *blockingPointer) Close() {
+	p.closeOnce.Do(func() { close(p.closed) })
+}
+
+func TestRunUsesPersistentPointerAndStopClosesIt(t *testing.T) {
+	pointer := &blockingPointer{started: make(chan struct{}), closed: make(chan struct{})}
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.pointer = pointer
+	c.findDevicesFn = func() ([]string, error) { return nil, nil }
+
+	if err := c.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	select {
+	case <-pointer.started:
+	case <-time.After(time.Second):
+		t.Fatal("cursor poll did not query the persistent pointer")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not close the pointer and unblock cursor polling")
+	}
+}
 
 // --- applyAcceleration ---
 

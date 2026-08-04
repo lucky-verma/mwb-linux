@@ -149,3 +149,103 @@ func TestReplaceBinary_IsAtomicAndPreservesMode(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateInstallVersion_RequiresForceForSourceBuild(t *testing.T) {
+	if err := validateInstallVersion("dev", false); err == nil {
+		t.Fatal("source build was allowed to replace itself without --force")
+	}
+	if err := validateInstallVersion("dev", true); err != nil {
+		t.Fatalf("forced source-build update failed: %v", err)
+	}
+	if err := validateInstallVersion("v0.6.1", false); err != nil {
+		t.Fatalf("release build was rejected: %v", err)
+	}
+}
+
+func TestBackupBinary_PreservesCurrentInode(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "mwb")
+	if err := os.WriteFile(dest, []byte("current binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	backup, err := backupBinary(dest, "v0.6.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backup != dest+"-0.6.1.bak" {
+		t.Fatalf("backup = %q", backup)
+	}
+	originalInfo, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupInfo, err := os.Stat(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(originalInfo, backupInfo) {
+		t.Fatal("backup is not a hard link to the current binary")
+	}
+
+	if err := replaceBinary(dest, []byte("new binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "current binary" {
+		t.Fatalf("backup content = %q", got)
+	}
+}
+
+func TestBackupBinary_DoesNotOverwriteExistingBackup(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "mwb")
+	if err := os.WriteFile(dest, []byte("current"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := dest + "-dev.bak"
+	if err := os.WriteFile(first, []byte("older backup"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	backup, err := backupBinary(dest, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backup != first+".1" {
+		t.Fatalf("backup = %q, want collision suffix", backup)
+	}
+	got, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "older backup" {
+		t.Fatalf("existing backup was overwritten: %q", got)
+	}
+}
+
+func TestRestartUnit_UsesUserService(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	systemctl := filepath.Join(dir, "systemctl")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MWB_TEST_SYSTEMCTL_ARGS\"\n"
+	if err := os.WriteFile(systemctl, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("MWB_TEST_SYSTEMCTL_ARGS", argsPath)
+
+	if err := restartUnit(context.Background(), "mwb.service"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "--user\nrestart\nmwb.service\n" {
+		t.Fatalf("systemctl args = %q", got)
+	}
+}

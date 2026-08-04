@@ -240,6 +240,47 @@ func TestReceive_WritesFile(t *testing.T) {
 	}
 }
 
+func TestReceive_RejectsPowerToysStatusHeaders(t *testing.T) {
+	for _, name := range []string{
+		`C:\Downloads\large.exe - File too big (greater than 100MB), please drag and drop the file instead!`,
+		`C:\Users\me\Documents - Folder is not supported, zip it first!`,
+		`C:\Downloads\vanished.txt not found!`,
+	} {
+		t.Run(filepath.Base(name), func(t *testing.T) {
+			dir := t.TempDir()
+			in := bytes.NewReader(wire(t, Header{Size: 0, Name: name}, nil))
+
+			if _, err := Receive(in, dir, DefaultMaxSize); !errors.Is(err, ErrPeerRejected) {
+				t.Fatalf("err = %v, want ErrPeerRejected", err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("peer error created %d filesystem entries", len(entries))
+			}
+		})
+	}
+}
+
+func TestReceive_AllowsLegitimateEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	in := bytes.NewReader(wire(t, Header{Size: 0, Name: "empty.txt"}, nil))
+
+	res, err := Receive(in, dir, DefaultMaxSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("empty file size = %d, want 0", info.Size())
+	}
+}
+
 // A peer that declares one size and sends more must not write past the cap.
 func TestReceive_UnderDeclaredSizeCannotOverrun(t *testing.T) {
 	dir := t.TempDir()

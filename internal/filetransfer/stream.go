@@ -40,6 +40,9 @@ func Receive(r io.Reader, dir string, maxSize int64) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := peerTransferError(hdr); err != nil {
+		return nil, err
+	}
 
 	// MWB reuses this channel for oversized clipboard text and images. Those
 	// belong in memory, not on disk.

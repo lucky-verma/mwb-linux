@@ -48,6 +48,7 @@ func runSubcommand() bool {
 		fs := flag.NewFlagSet("update", flag.ExitOnError)
 		checkOnly := fs.Bool("check", false, "report whether an update exists without installing it")
 		force := fs.Bool("force", false, "reinstall even when already up to date")
+		restart := fs.Bool("restart", false, "restart the running systemd user service after installing")
 		_ = fs.Parse(os.Args[2:])
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -57,6 +58,7 @@ func runSubcommand() bool {
 			CurrentVersion: version,
 			CheckOnly:      *checkOnly,
 			Force:          *force,
+			Restart:        *restart,
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "update failed:", err)
