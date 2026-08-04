@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `mwb update` creates a versioned hard-link backup beside the running binary
   before replacement and refuses to replace an unversioned source build unless
   `--force` is explicit.
+- Public documentation is reduced to current architecture and file-transfer
+  guides; stale implementation plans and unused media are removed.
 
 ### Fixed
 - Known PowerToys zero-byte file-transfer error headers are rejected before any
@@ -97,7 +99,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   files only, no folders, with a 100 MB default cap taken from
   `MAX_CLIPBOARD_FILE_SIZE_CAN_BE_SENT`. Configurable via `file_transfer`,
   `file_dir` and `max_file_size`. The wire format and the receive-side safety
-  controls are documented in `docs/plans/2026-07-30-file-transfer-design.md`.
+  controls are documented in `docs/file-transfer.md`.
 - `mwb update` downloads and installs the latest GitHub release, verifying it
   against the SHA-256 in that release's `checksums.txt` and replacing the binary
   atomically. `--check` reports availability without installing; `--force`
@@ -253,7 +255,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   mutex invariants, edge gate logic, and floating slave filtering.
 - PR template (`.github/PULL_REQUEST_TEMPLATE.md`) with build, race, lint, and
   xinput safety checklists.
-- `docs/ARCHITECTURE.md`: documented 5 critical invariants with code examples
+- `docs/architecture.md`: documented 5 critical invariants with code examples
   and test references to prevent recurrence of known bug classes.
 
 ### Fixed
@@ -305,7 +307,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `xinput` subprocess call.
 
 ### Documentation
-- `docs/ARCHITECTURE.md`: replaced ASCII diagrams with Mermaid (component flow,
+- `docs/architecture.md`: replaced ASCII diagrams with Mermaid (component flow,
   connection lifecycle, cursor switching) matching the README theme. Corrected
   stale values to match the code: edge poll 10ms (was 50ms), switch grace 100ms
   (was 500ms), `canSwitch`/`canReturn` gates instead of the old 2s/3s cooldowns,
