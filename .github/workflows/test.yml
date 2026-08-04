@@ -25,6 +25,21 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: Install clipboard integration dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libei-dev sway wl-clipboard xclip xsel xvfb
+
+      - name: Test optional native Wayland capture build
+        run: go test -race -tags wayland_portal ./...
+
+      - name: Test X11 clipboard
+        run: ./scripts/test-x11-clipboard.sh
+
+      - name: Test native Wayland clipboard
+        run: |
+          ./scripts/test-wayland-clipboard.sh
+
       - name: Vet
         run: go vet ./...
 

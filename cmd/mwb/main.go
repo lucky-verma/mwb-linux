@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync/atomic"
@@ -265,6 +264,7 @@ func main() {
 				slog.Info("screen detected", "width", screen.Width, "height", screen.Height)
 
 				cap = capture.New(conn, screen, *edgeSide)
+				cap.SetCaptureBackend(cfg.CaptureBackend)
 				if clipMgr != nil {
 					// Capturer can return the cursor locally when its virtual remote
 					// position reaches the shared edge; no network activation packet
@@ -289,12 +289,10 @@ func main() {
 				handler.OnActivated = func() {
 					cap.SetActive(true)
 					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-						defer cancel()
 						entryX, entryY := cap.SafeEntryPosition()
-						_ = exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-							fmt.Sprintf("%d", entryX),
-							fmt.Sprintf("%d", entryY)).Run()
+						if err := cap.Reenter(entryX, entryY); err != nil {
+							slog.Warn("place local cursor after activation", "err", err)
+						}
 					}()
 				}
 
@@ -302,13 +300,11 @@ func main() {
 				// reclaim control and move cursor away from our edge
 				handler.OnReclaimed = func() {
 					cap.SetActive(true)
-					// Move cursor to center so it doesn't immediately re-trigger edge
 					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-						defer cancel()
-						_ = exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-							fmt.Sprintf("%d", screen.Width/2),
-							fmt.Sprintf("%d", screen.Height/2)).Run()
+						entryX, entryY := cap.SafeEntryPosition()
+						if err := cap.Reenter(entryX, entryY); err != nil {
+							slog.Warn("place local cursor after reclaim", "err", err)
+						}
 					}()
 				}
 

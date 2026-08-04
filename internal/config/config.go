@@ -47,6 +47,11 @@ type Config struct {
 	// absolute-mirror direction). 1.0 mirrors Windows 1:1; raise it for a faster
 	// local cursor when Windows is in control. <= 0 means unset (defaults to 1).
 	InboundMultiplier float64 `toml:"inbound_multiplier"`
+
+	// CaptureBackend selects bidirectional edge capture. "auto" keeps X11 on
+	// X11 and uses the InputCapture portal in native Wayland sessions when that
+	// backend was compiled in. "x11" and "portal" are explicit overrides.
+	CaptureBackend string `toml:"capture_backend"`
 }
 
 func Load(path string) (*Config, error) {
@@ -90,6 +95,14 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Edge == "" {
 		cfg.Edge = "left"
+	}
+	if cfg.CaptureBackend == "" {
+		cfg.CaptureBackend = "auto"
+	}
+	switch cfg.CaptureBackend {
+	case "auto", "x11", "portal":
+	default:
+		return nil, fmt.Errorf("config: capture_backend must be auto, x11, or portal")
 	}
 
 	// The config holds the plaintext security key — the only secret protecting

@@ -89,7 +89,8 @@ chmod +x mwb-linux-amd64
 sudo mv mwb-linux-amd64 /usr/local/bin/mwb
 
 # Install dependencies
-sudo apt install xdotool xclip
+sudo apt install xdotool xclip wl-clipboard
+# Arch Linux and CachyOS: sudo pacman -S xdotool xclip wl-clipboard xorg-xrandr
 
 # Setup permissions
 sudo bash -c 'modprobe uinput && echo uinput > /etc/modules-load.d/uinput.conf'
@@ -105,7 +106,8 @@ go install github.com/lucky-verma/mwb-linux/cmd/mwb@latest
 ```
 
 Puts `mwb` in `$(go env GOPATH)/bin`. You still need the system dependencies and
-permissions from [From Binary](#from-binary): `xdotool`/`xclip`, the `uinput`
+permissions from [From Binary](#from-binary): `xdotool`, `xclip`,
+`wl-clipboard`, the `uinput`
 module, the udev rule, and membership of the `input` group. This build reports
 `dev` for `mwb version`, since the release ldflags are not applied.
 
@@ -129,7 +131,7 @@ manually when you explicitly want Linux → Windows control.
 
 It does not set up system dependencies. If this is a fresh machine, run the
 dependency and permission steps from [From Binary](#from-binary) first
-(`xdotool`/`xclip`, the `uinput` module, the udev rule, and the
+(`xdotool`, `xclip`, `wl-clipboard`, the `uinput` module, the udev rule, and the
 `input` group).
 
 > **Note:** Log out and back in after installation for group changes to take effect.
@@ -266,6 +268,7 @@ keep the client on a trusted network segment.
 | `file_dir` | — | Deprecated and ignored. Windows files use hidden clipboard backing storage under `$XDG_CACHE_HOME/mwb/clipboard` and a native GNOME/generic file selection, then appear in a visible folder only on paste |
 | `max_file_size` | 104857600 | Per-transfer cap in bytes. The default matches MWB's own 100 MB limit; a stock Windows peer neither sends nor accepts more |
 | `keyboard_layout` | auto | Inbound Windows-to-Linux keyboard mapping. `auto` detects the local Linux layout when possible; supported profiles include `us`, `de`, `fr`, `be`, `es`, `it`, `gb`, `pt`, `no`/`dk`/`se`/`fi`, `ch`, and `nl` |
+| `capture_backend` | auto | Bidirectional capture backend: `auto`, `x11`, or `portal`. `portal` requires a source build with the experimental `wayland_portal` tag |
 
 > **Config file security:** `config.toml` stores the security key in plaintext.
 > The installer creates it with `0600` permissions (owner-only), and `mwb`
@@ -311,7 +314,16 @@ Run the setup permissions commands above, then log out and back in.
 
 ### Clipboard not syncing
 
-Ensure `xclip` is installed: `sudo apt install xclip`
+On native Wayland, ensure `wl-copy` and `wl-paste` are installed. Use
+`sudo apt install wl-clipboard` on Debian or Ubuntu, or
+`sudo pacman -S wl-clipboard` on Arch Linux or CachyOS. On X11, ensure `xclip`
+is installed.
+
+The startup log reports `backend=wayland` or `backend=x11`. Check it with:
+
+```bash
+journalctl --user -u mwb -b | grep 'clipboard sharing enabled'
+```
 
 ### Disable clipboard sharing
 
@@ -374,7 +386,11 @@ scripts/
 - **Keyboard on Windows lock screen** — Keyboard input may not work on the Windows lock screen (Winlogon desktop security restriction)
 - **Middle mouse button auto-scroll** — Middle-click auto-scroll (scroll lock mode) does not work in browsers; normal middle-click works
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
-- **Bidirectional mode requires X11** — Edge detection queries the X11 server directly; `xdotool` is retained for the infrequent cursor recenter operation. (Device isolation itself is display-server agnostic: `EVIOCGRAB` works identically on X11, Wayland and the console.) Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
+- **Native Wayland input is experimental:** Normal release builds keep the
+  existing X11/XWayland edge-capture path. A source build can enable the
+  compositor-managed InputCapture portal and libei path described below. It
+  still needs hands-on testing across KDE, GNOME, and Hyprland before it can be
+  included in a release. Native Wayland clipboard sync uses `wl-clipboard`.
 - **Keyboard layout metadata** — PowerToys MWB keyboard packets carry Windows virtual-key codes and flags, but not hardware scan codes or Unicode text. MWB Linux uses `keyboard_layout` profiles for common layouts; unsupported profiles fall back to the original US-compatible mapping. Fully zero-config global layout support requires sender-side scan code or Unicode metadata.
 - **File copy is one file at a time** — Matching MWB itself, folders and
   multi-file selections are not transferred; zip them first. The 100 MB default
@@ -400,6 +416,20 @@ make test     # Run tests
 make lint     # Run linter
 make check    # All of the above
 ```
+
+For the experimental native Wayland input backend, install the libei headers
+first (`libei-dev` on Debian or Ubuntu, `libei` on Arch Linux and CachyOS), then
+build and test it explicitly:
+
+```bash
+make build-wayland
+make test-wayland
+```
+
+Set `capture_backend = "portal"` while testing. The compositor must implement
+the XDG InputCapture portal. The first run may show a desktop permission dialog.
+This build does not read or grab `/dev/input/event*`; captured input comes only
+from the compositor through libei.
 
 ## Acknowledgments
 

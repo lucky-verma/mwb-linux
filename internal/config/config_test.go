@@ -66,6 +66,9 @@ key = "SomeKeyHere!1234"
 	if cfg.KeyboardLayout != "auto" {
 		t.Errorf("default keyboard_layout = %q, want auto", cfg.KeyboardLayout)
 	}
+	if cfg.CaptureBackend != "auto" {
+		t.Errorf("default capture_backend = %q, want auto", cfg.CaptureBackend)
+	}
 }
 
 func TestAccelMultiplierExplicit(t *testing.T) {
@@ -103,6 +106,40 @@ keyboard_layout = "de"
 	}
 	if cfg.KeyboardLayout != "de" {
 		t.Errorf("keyboard_layout = %q, want de", cfg.KeyboardLayout)
+	}
+}
+
+func TestCaptureBackendExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+capture_backend = "portal"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CaptureBackend != "portal" {
+		t.Errorf("capture_backend = %q, want portal", cfg.CaptureBackend)
+	}
+}
+
+func TestCaptureBackendRejectsUnknownValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+capture_backend = "wayland"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("unknown capture_backend should be rejected")
 	}
 }
 

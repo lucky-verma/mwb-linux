@@ -22,6 +22,7 @@ Depends:
  ${misc:Depends},
  xclip,
  xdotool,
+ wl-clipboard,
  x11-xserver-utils
 Static-Built-Using: ${misc:Static-Built-Using}
 Description: Linux client compatible with PowerToys Mouse Without Borders

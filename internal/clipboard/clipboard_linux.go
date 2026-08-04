@@ -8,14 +8,11 @@ package clipboard
 import (
 	"bytes"
 	"compress/flate"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +24,7 @@ import (
 const (
 	dataSize      = 48 // bytes of clipboard data per 64-byte packet
 	pollInterval  = 1 * time.Second
-	execTimeout   = 5 * time.Second // max time for any xclip/xsel call
+	execTimeout   = 5 * time.Second // max time for any desktop clipboard command
 	textTypeSep   = "{4CFF57F7-BEDD-43d5-AE8F-27A61E886F2F}"
 	maxInlineSize = 1048576     // 1 MB — max for inline TCP send
 	maxRecvBuf    = 2 * 1048576 // 2 MB — max in-flight clipboard receive buffer
@@ -54,7 +51,7 @@ type Manager struct {
 	OnFileCopy func(paths []string)
 
 	conn        *network.Conn
-	display     string
+	backend     clipboardBackend
 	lastHash    string // hash of last clipboard content we sent
 	mu          sync.Mutex
 	recvBuf     bytes.Buffer // accumulates incoming clipboard chunks
@@ -76,10 +73,10 @@ type Manager struct {
 // NewManager creates a clipboard manager.
 func NewManager(conn *network.Conn, display string) *Manager {
 	m := &Manager{
-		conn:    conn,
-		display: display,
-		stopCh:  make(chan struct{}),
+		conn:   conn,
+		stopCh: make(chan struct{}),
 	}
+	m.backend = newClipboardBackend(display)
 	m.stageRoot = defaultStageRoot()
 	m.setFileClipboard = m.setLocalFileClipboard
 	return m
@@ -96,7 +93,7 @@ func (m *Manager) Start() {
 		defer m.wg.Done()
 		m.pollClipboard()
 	}()
-	slog.Info("clipboard sharing enabled")
+	slog.Info("clipboard sharing enabled", "backend", m.backend.name())
 }
 
 // Stop stops clipboard monitoring and waits for the goroutine to exit.
@@ -505,24 +502,14 @@ func (m *Manager) handleImageClipboard(data []byte) {
 		}
 	}
 
-	// Feed image bytes directly to xclip. Avoiding a temporary file eliminates
+	// Feed image bytes directly to the desktop backend. Avoiding a temporary file eliminates
 	// predictable-path, symlink, and local clipboard-disclosure risks entirely.
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", mimeType, "-i")
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	cmd.Stdin = bytes.NewReader(imgData)
-	err := cmd.Run()
-	cancel()
+	err := m.backend.writeImage(imgData, mimeType)
 	if err != nil {
-		slog.Error("set image clipboard via xclip failed", "err", err, "mime", mimeType)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-		cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
-		cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
-		cmd2.Stdin = bytes.NewReader(imgData)
-		if err2 := cmd2.Run(); err2 != nil {
+		slog.Error("set image clipboard failed", "backend", m.backend.name(), "err", err, "mime", mimeType)
+		if err2 := m.backend.writeImage(imgData, "image/png"); err2 != nil {
 			slog.Error("set image clipboard fallback also failed", "err", err2)
 		}
-		cancel2()
 		return
 	}
 
@@ -538,62 +525,30 @@ func (m *Manager) handleImageClipboard(data []byte) {
 // getLocalClipboard reads the current clipboard text.
 // Times out after execTimeout to prevent blocking the poll goroutine indefinitely.
 func (m *Manager) getLocalClipboard() string {
-	for _, args := range [][]string{
-		{"xclip", "-selection", "clipboard", "-o"},
-		{"xsel", "--clipboard", "--output"},
-	} {
-		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-		out, err := cmd.Output()
-		cancel()
-		if err == nil {
-			return string(out)
-		}
+	if m.backend == nil {
+		return ""
 	}
-	return ""
+	return m.backend.readText()
 }
 
 // setLocalClipboard sets the clipboard text.
-// Times out after execTimeout to prevent blocking on a hung xclip/xsel.
+// Times out after execTimeout to prevent blocking on a hung backend command.
 func (m *Manager) setLocalClipboard(text string) {
-	for _, args := range [][]string{
-		{"xclip", "-selection", "clipboard"},
-		{"xsel", "--clipboard", "--input"},
-	} {
-		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-		cmd.Stdin = strings.NewReader(text)
-		err := cmd.Run()
-		cancel()
-		if err == nil {
-			return
-		}
+	if m.backend == nil {
+		slog.Error("set clipboard failed: no local clipboard backend")
+		return
 	}
-	slog.Error("set clipboard failed — both xclip and xsel failed")
+	if err := m.backend.writeText(text); err != nil {
+		slog.Error("set clipboard failed", "backend", m.backend.name(), "err", err)
+	}
 }
 
 // getLocalImageClipboard checks if clipboard contains an image and returns it.
 func (m *Manager) getLocalImageClipboard() []byte {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	out, err := cmd.Output()
-	cancel()
-	if err != nil || !strings.Contains(string(out), "image/png") {
+	if m.backend == nil {
 		return nil
 	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-	cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-	cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
-	imgData, err := cmd2.Output()
-	cancel2()
-	if err != nil || len(imgData) == 0 {
-		return nil
-	}
-	return imgData
+	return m.backend.readImage()
 }
 
 // sendImage sends image data to the remote via ClipboardImage packets.

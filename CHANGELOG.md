@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Native Wayland clipboard access through `wl-copy` and `wl-paste`, selected
+  automatically when a Wayland session is active. Text, PNG images, and
+  single-file selections keep the existing MWB network behavior.
+- An experimental source build for native Wayland bidirectional input using
+  the XDG InputCapture portal and libei. It is isolated behind the
+  `wayland_portal` build tag while KDE, GNOME, and Hyprland testing is pending.
+
+### Changed
+- Clipboard access now has separate Wayland and X11 backends. X11 keeps its
+  existing `xclip` and `xsel` path, and remains the fallback if native Wayland
+  commands fail.
+- The installer and Linux packages include `wl-clipboard`.
+- Normal builds keep the existing X11 capture path. Portal-enabled builds use
+  capability detection in `auto` mode and never mix libei events with raw evdev
+  capture.
+
 ## [0.6.2] - 2026-08-03
 
 ### Added

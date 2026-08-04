@@ -26,6 +26,9 @@ make lint
 
 # Run all checks before committing
 make check
+
+# Optional native Wayland capture (requires libei-dev)
+make test-wayland
 ```
 
 ## Submitting Changes
