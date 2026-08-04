@@ -214,7 +214,8 @@ MWB Linux implements the full Mouse Without Borders protocol:
 7. **Clipboard** — Bidirectional text/image sync via compressed clipboard packets
 8. **File copy** — Copy one file, switch to the other machine, and paste it into the folder you choose. In both directions the receiver stages the file privately on its clipboard; a copy alone never creates a visible destination file. Bytes travel over a second connection on the clipboard port (base; control is base+1), matching PowerToys MWB
 
-For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For implementation details, see the [architecture](docs/architecture.md) and
+[file-transfer](docs/file-transfer.md) documentation.
 
 ## Security
 
@@ -305,17 +306,21 @@ keep the client on a trusted network segment.
 ## Troubleshooting
 
 ### "permission denied" on /dev/uinput
+
 Run the setup permissions commands above, then log out and back in.
 
 ### Clipboard not syncing
+
 Ensure `xclip` is installed: `sudo apt install xclip`
 
 ### Disable clipboard sharing
+
 Set `clipboard = false` in `config.toml`, or run with `-no-clipboard`. The Linux
 client then never reads or writes the local clipboard, so it won't override what
 you copied on Windows.
 
 ### Mouse controls both screens simultaneously
+
 Make sure you are running bidirectional mode with `mwb -bidi -edge left` after
 the udev/input-group setup and a fresh login. Avoid `sudo mwb` for normal use:
 it reads root's config and can miss the user's display/session.
@@ -329,14 +334,17 @@ systemctl --user restart mwb
 ```
 
 ### Connection refused
+
 - Check Windows firewall allows port 15100-15101
 - Verify the IP address in config.toml
 - Ensure PowerToys MWB is enabled on Windows
 
 ### Cursor bounces back immediately
+
 Set "Move mouse relatively" to OFF in PowerToys MWB settings.
 
 ### Cursor returns from the far edge of the other laptop
+
 Upgrade to a build with directional `MachineSwitched`/`NextMachine` filtering.
 The Linux client should only accept return requests from the edge configured by
 `-edge`; touching the other laptop's far edge should stop there, not bring
@@ -344,7 +352,7 @@ control back to Ubuntu.
 
 ## Project Structure
 
-```
+```text
 cmd/mwb/              CLI entry point
 internal/
   capture/            Edge detection, evdev capture, EVIOCGRAB device isolation
@@ -354,7 +362,9 @@ internal/
   network/            TCP connection, encryption, packet send/receive
   protocol/           MWB packet types, serialization, AES-256-CBC
 docs/
-  ARCHITECTURE.md     Detailed protocol and architecture documentation
+  README.md           Documentation index
+  architecture.md     Runtime design and contributor invariants
+  file-transfer.md    File-channel behavior and safety controls
 scripts/
   install.sh          Installation helper script
 ```
