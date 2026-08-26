@@ -38,24 +38,85 @@ type Conn struct {
 
 // Cached key material — PBKDF2 is expensive (50k iterations), only derive once.
 var (
-	keyMu        sync.Mutex
-	cachedAESKey []byte
-	cachedIV     []byte
-	cachedMagic  uint32
-	cachedSecret string
+	keyMu    sync.Mutex
+	keyCache struct {
+		secret  string
+		magic   uint32
+		magicOK bool
+		legacy  []byte
+	}
 )
 
-func getCachedKeyMaterial(securityKey string) ([]byte, []byte, uint32) {
+// legacyCrypto selects the stream encryption PowerToys used before 0.101. It is
+// set once at startup from config, ahead of any connection attempt.
+var legacyCrypto atomic.Bool
+
+// SetLegacyCrypto selects the pre-0.101 PowerToys stream encryption: a fixed
+// PBKDF2 salt and IV at 50,000 iterations, rather than the per-connection
+// random salt and IV that PowerToys has sent in the clear since 0.101. Call it
+// before opening any connection; it is not meant to change at runtime.
+func SetLegacyCrypto(on bool) {
+	legacyCrypto.Store(on)
+}
+
+// resetKeyCacheLocked drops cached material when the security key changes.
+// Callers must hold keyMu.
+func resetKeyCacheLocked(securityKey string) {
+	if keyCache.secret != securityKey {
+		keyCache = struct {
+			secret  string
+			magic   uint32
+			magicOK bool
+			legacy  []byte
+		}{secret: securityKey}
+	}
+}
+
+// getCachedMagic caches the security-key magic value, which costs 50k SHA-512
+// rounds. The stream key is not cached alongside it: outside legacy mode
+// PowerToys picks a fresh PBKDF2 salt per stream, so that key is derived per
+// connection.
+func getCachedMagic(securityKey string) uint32 {
 	keyMu.Lock()
 	defer keyMu.Unlock()
-	if securityKey == cachedSecret && cachedAESKey != nil {
-		return cachedAESKey, cachedIV, cachedMagic
+	resetKeyCacheLocked(securityKey)
+	if !keyCache.magicOK {
+		keyCache.magic = protocol.Get24BitHash(securityKey)
+		keyCache.magicOK = true
 	}
-	cachedAESKey = protocol.DeriveKey(securityKey)
-	cachedIV = protocol.FixedIV()
-	cachedMagic = protocol.Get24BitHash(securityKey)
-	cachedSecret = securityKey
-	return cachedAESKey, cachedIV, cachedMagic
+	return keyCache.magic
+}
+
+// getCachedLegacyKey caches the pre-0.101 fixed-salt key. It is derived lazily,
+// so a peer on current PowerToys never pays for it.
+func getCachedLegacyKey(securityKey string) []byte {
+	keyMu.Lock()
+	defer keyMu.Unlock()
+	resetKeyCacheLocked(securityKey)
+	if keyCache.legacy == nil {
+		keyCache.legacy = protocol.DeriveKey(securityKey)
+	}
+	return keyCache.legacy
+}
+
+// newEncryptWriter opens the send half of the stream in whichever scheme the
+// Windows peer speaks. The current scheme writes a cleartext salt+IV header
+// first; the legacy one starts straight into ciphertext.
+func newEncryptWriter(w io.Writer, securityKey string) (*protocol.EncryptWriter, error) {
+	if legacyCrypto.Load() {
+		return protocol.NewEncryptWriter(w, getCachedLegacyKey(securityKey), protocol.FixedIV())
+	}
+	return protocol.NewEncryptWriterWithHeader(w, securityKey)
+}
+
+// newDecryptReader opens the receive half. In the current scheme this blocks
+// until the peer has sent its header, which is why callers must flush their own
+// send side first.
+func newDecryptReader(r io.Reader, securityKey string) (*protocol.DecryptReader, error) {
+	if legacyCrypto.Load() {
+		return protocol.NewDecryptReader(r, getCachedLegacyKey(securityKey), protocol.FixedIV())
+	}
+	return protocol.NewDecryptReaderWithHeader(r, securityKey)
 }
 
 // newSecureStream configures TCP options, creates the AES-CBC streams and
@@ -71,7 +132,7 @@ func newSecureStream(raw net.Conn, securityKey, machineName string, timeout time
 		return nil, fmt.Errorf("set handshake deadline: %w", err)
 	}
 
-	aesKey, iv, magic := getCachedKeyMaterial(securityKey)
+	magic := getCachedMagic(securityKey)
 
 	if tc, ok := raw.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
@@ -82,13 +143,14 @@ func newSecureStream(raw net.Conn, securityKey, machineName string, timeout time
 		_ = tc.SetReadBuffer(320 * 1024)
 	}
 
-	enc, err := protocol.NewEncryptWriter(raw, aesKey, iv)
+	// Send side first, receive side second. PowerToys builds its encrypted and
+	// decrypted streams lazily, so it may well read before it writes: if we
+	// blocked on its header before flushing our own, both ends would sit
+	// waiting for the other to speak first. The order is harmless in legacy
+	// mode, where neither side sends a header at all.
+	enc, err := newEncryptWriter(raw, securityKey)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt stream: %w", err)
-	}
-	dec, err := protocol.NewDecryptReader(raw, aesKey, iv)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt stream: %w", err)
 	}
 
 	// IV exchange: send random 16-byte block, read peer's random block
@@ -98,6 +160,11 @@ func newSecureStream(raw net.Conn, securityKey, machineName string, timeout time
 	}
 	if _, err := enc.Write(ranData); err != nil {
 		return nil, fmt.Errorf("send IV block: %w", err)
+	}
+
+	dec, err := newDecryptReader(raw, securityKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt stream: %w", err)
 	}
 	peerRan := make([]byte, 16)
 	if _, err := io.ReadFull(dec, peerRan); err != nil {

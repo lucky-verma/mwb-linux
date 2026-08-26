@@ -16,8 +16,6 @@ import (
 
 func TestConnectionHandshake(t *testing.T) {
 	securityKey := "TestSecurityKey!!"
-	aesKey := protocol.DeriveKey(securityKey)
-	iv := protocol.FixedIV()
 	magic := protocol.Get24BitHash(securityKey)
 
 	// Start a fake MWB server
@@ -36,13 +34,9 @@ func TestConnectionHandshake(t *testing.T) {
 		}
 		defer func() { _ = conn.Close() }()
 
-		// Server: create encrypted streams
-		enc, err := protocol.NewEncryptWriter(conn, aesKey, iv)
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		dec, err := protocol.NewDecryptReader(conn, aesKey, iv)
+		// Server: create encrypted streams. Send side first, so that neither
+		// end is left waiting for the other's salt+IV header.
+		enc, err := protocol.NewEncryptWriterWithHeader(conn, securityKey)
 		if err != nil {
 			serverDone <- err
 			return
@@ -56,7 +50,12 @@ func TestConnectionHandshake(t *testing.T) {
 			return
 		}
 
-		// Server: read random IV block from client
+		// Server: read the client's header, then its random IV block
+		dec, err := protocol.NewDecryptReaderWithHeader(conn, securityKey)
+		if err != nil {
+			serverDone <- err
+			return
+		}
 		clientRan := make([]byte, 16)
 		if _, err := io.ReadFull(dec, clientRan); err != nil {
 			serverDone <- err
@@ -206,5 +205,83 @@ func TestConnectWithRetryStopsDuringDelay(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("retry loop did not stop")
+	}
+}
+
+// TestSecureStreamLegacyMode covers the escape hatch for a Windows peer pinned
+// to PowerToys older than 0.101: with legacy_crypto set, neither side sends a
+// salt+IV header and both derive the fixed-salt key instead.
+func TestSecureStreamLegacyMode(t *testing.T) {
+	SetLegacyCrypto(true)
+	t.Cleanup(func() { SetLegacyCrypto(false) })
+
+	const securityKey = "TestSecurityKey!!"
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	peerDone := make(chan error, 1)
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			peerDone <- err
+			return
+		}
+		defer func() { _ = raw.Close() }()
+		_, err = newSecureStream(raw, securityKey, "windows", 5*time.Second)
+		peerDone <- err
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+
+	if _, err := newSecureStream(raw, securityKey, "linux", 5*time.Second); err != nil {
+		t.Fatalf("client secure stream in legacy mode: %v", err)
+	}
+	if err := <-peerDone; err != nil {
+		t.Fatalf("peer secure stream in legacy mode: %v", err)
+	}
+}
+
+// TestSecureStreamCurrentMode is the same exchange in the default scheme, where
+// both ends do send a cleartext salt+IV header.
+func TestSecureStreamCurrentMode(t *testing.T) {
+	const securityKey = "TestSecurityKey!!"
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	peerDone := make(chan error, 1)
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			peerDone <- err
+			return
+		}
+		defer func() { _ = raw.Close() }()
+		_, err = newSecureStream(raw, securityKey, "windows", 5*time.Second)
+		peerDone <- err
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+
+	if _, err := newSecureStream(raw, securityKey, "linux", 5*time.Second); err != nil {
+		t.Fatalf("client secure stream: %v", err)
+	}
+	if err := <-peerDone; err != nil {
+		t.Fatalf("peer secure stream: %v", err)
 	}
 }

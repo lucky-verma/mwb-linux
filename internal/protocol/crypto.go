@@ -93,3 +93,27 @@ func ClearStamp(buf []byte) {
 	buf[2] = 0
 	buf[3] = 0
 }
+
+// --- PowerToys per-connection key material (PowerToys >= 0.101) ---
+//
+// PowerToys PRs #48742 and #49600 changed the MWB wire crypto:
+//   * every encrypted stream is now prefixed with a 32-byte CLEARTEXT header
+//     holding a random 16-byte PBKDF2 salt followed by a random 16-byte AES IV,
+//     replacing the old fixed salt/IV derived from initialIVStr;
+//   * the PBKDF2 iteration count went from 50,000 to 100,000.
+// The magic number (Get24BitHash) was NOT changed.
+
+const (
+	// SaltSize is the length of the per-connection PBKDF2 salt.
+	SaltSize = 16
+	// HeaderSize is the cleartext salt+IV header sent at the head of each stream.
+	HeaderSize = SaltSize + aesBlockSize
+	// pbkdf2IterV2 matches PowerToys' KeyDerivationIterations.
+	pbkdf2IterV2 = 100000
+)
+
+// DeriveKeyWithSalt derives a 32-byte AES-256 key from the security key and a
+// per-connection salt, mirroring PowerToys' Encryption.GenLegalKey(salt).
+func DeriveKeyWithSalt(securityKey string, salt []byte) []byte {
+	return pbkdf2.Key([]byte(securityKey), salt, pbkdf2IterV2, aesKeySize, sha512.New)
+}

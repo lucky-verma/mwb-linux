@@ -2,6 +2,7 @@
 package protocol
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -93,5 +94,31 @@ func TestChecksumAndMagic(t *testing.T) {
 	buf[15] ^= 0xFF
 	if err := ValidatePacket(buf, magic); err == nil {
 		t.Error("validation should fail after corruption")
+	}
+}
+
+func TestDeriveKeyWithSalt(t *testing.T) {
+	salt1 := bytes.Repeat([]byte{0x01}, SaltSize)
+	salt2 := bytes.Repeat([]byte{0x02}, SaltSize)
+
+	key1 := DeriveKeyWithSalt("TestSecurityKey!!", salt1)
+	if len(key1) != aesKeySize {
+		t.Fatalf("key length = %d, want %d", len(key1), aesKeySize)
+	}
+
+	// Same key and salt must reproduce the same bytes.
+	if !bytes.Equal(key1, DeriveKeyWithSalt("TestSecurityKey!!", salt1)) {
+		t.Error("derivation is not deterministic for a fixed key and salt")
+	}
+
+	// A different salt must produce a different key — that is the whole point
+	// of PowerToys sending a fresh salt per connection.
+	if bytes.Equal(key1, DeriveKeyWithSalt("TestSecurityKey!!", salt2)) {
+		t.Error("different salts produced the same key")
+	}
+
+	// So must a different security key.
+	if bytes.Equal(key1, DeriveKeyWithSalt("DifferentKey12345", salt1)) {
+		t.Error("different security keys produced the same key")
 	}
 }
