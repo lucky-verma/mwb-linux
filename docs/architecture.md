@@ -8,7 +8,7 @@ Linux input back to Windows.
 
 ```mermaid
 flowchart LR
-    LinuxInput[Linux keyboard and mouse] --> Capture[evdev capture]
+    LinuxInput[Linux keyboard and mouse] --> Capture[X11 evdev or Wayland portal capture]
     Capture --> Protocol[MWB protocol]
     Protocol <-->|encrypted TCP| PowerToys[PowerToys MWB on Windows]
     PowerToys --> Protocol
@@ -22,7 +22,7 @@ The process has four main jobs:
 1. Maintain an encrypted MWB connection with the configured Windows machine.
 2. Inject incoming keyboard and mouse packets through Linux `uinput` devices.
 3. In bidirectional mode, detect the configured screen edge, capture local
-   `evdev` events, and forward them to Windows.
+   input through the selected backend, and forward it to Windows.
 4. Synchronize clipboard text, images, and supported file selections.
 
 ## Connections and ports
@@ -90,9 +90,9 @@ the US-compatible mapping.
 
 ### Linux to Windows
 
-Bidirectional mode requires X11 or XWayland. One persistent X11 connection
-queries the pointer position every 10 ms. When the pointer reaches the selected
-edge, MWB Linux:
+The normal build keeps the existing X11/XWayland backend. One persistent X11
+connection queries the pointer position every 10 ms. When the pointer reaches
+the selected edge, MWB Linux:
 
 1. Takes an exclusive `EVIOCGRAB` on physical keyboards and pointers.
 2. Sends an entry-position mouse burst to Windows.
@@ -105,11 +105,25 @@ edge, MWB Linux:
 process exits or crashes, so input recovery does not depend on a cleanup
 command running successfully.
 
+An optional `wayland_portal` build uses the XDG InputCapture portal instead.
+The compositor provides screen zones, owns the edge barriers, and sends the
+captured keyboard and pointer events over libei. This path does not scan or
+grab raw input devices. It supports portal versions 1 and 2, keeps separate
+barriers for disconnected monitor segments, and returns local ownership if the
+portal disables or closes a capture. It remains experimental until it has been
+tested on real KDE, GNOME, and Hyprland sessions.
+
 ## Clipboard and files
 
 Text and images use clipboard packets on the control stream. Files use the
 separate clipboard port and have their own handshake and framing. See
 [File transfer](file-transfer.md) for the full flow and safety rules.
+
+Local clipboard access is selected at runtime. Native Wayland sessions use
+`wl-copy` and `wl-paste`; X11 sessions keep the existing `xclip` and `xsel`
+path. If the service did not inherit `WAYLAND_DISPLAY`, it checks live Wayland
+sockets below `XDG_RUNTIME_DIR`. A failed Wayland command falls back to X11 for
+desktops where XWayland clipboard bridging is available.
 
 ## Important invariants
 
@@ -138,7 +152,7 @@ Tests named after these invariants live beside the relevant package code.
 | Path | Responsibility |
 | --- | --- |
 | `cmd/mwb` | CLI, startup, reconnect loop, and component wiring |
-| `internal/capture` | X11 edge detection, evdev capture, and device isolation |
+| `internal/capture` | X11/evdev and optional Wayland portal/libei capture |
 | `internal/clipboard` | Text, image, and file-selection clipboard handling |
 | `internal/config` | TOML configuration |
 | `internal/filetransfer` | File-channel framing and safe receive/write logic |
@@ -149,7 +163,10 @@ Tests named after these invariants live beside the relevant package code.
 
 ## Platform boundary
 
-Receive-only input works through Linux uinput without an X11 capture backend.
-Bidirectional edge detection and cursor repositioning currently use X11 or
-XWayland. Native Wayland capture and clipboard support require compositor or
-desktop-portal integration and are tracked separately in GitHub issues.
+Receive-only input works through Linux uinput and does not depend on the display
+server. Normal bidirectional builds use X11 or XWayland. The optional native
+Wayland build requires a compositor with the XDG InputCapture portal and libei.
+If that portal is absent, automatic selection keeps the existing X11 path. A
+portal permission or setup failure is reported instead of silently switching to
+raw device capture. Clipboard sync supports native Wayland through
+`wl-clipboard`.

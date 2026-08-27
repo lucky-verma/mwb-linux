@@ -7,6 +7,7 @@ package capture
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -63,6 +64,8 @@ type inputEvent struct {
 
 // ScreenInfo holds screen dimensions.
 type ScreenInfo struct {
+	X      int32
+	Y      int32
 	Width  int32
 	Height int32
 }
@@ -78,6 +81,8 @@ type Capturer struct {
 	setGrabFn     func(*os.File, bool) error // test seam; nil uses the real ioctl
 	findDevicesFn func() ([]string, error)   // test seam; nil scans /dev/input
 	pointer       pointerPositioner          // one persistent X11 connection for edge polling
+	native        nativeCapture              // non-nil for compositor-mediated Wayland capture
+	backendName   string                     // auto, x11, or portal
 	stopCh        chan struct{}
 	wg            sync.WaitGroup            // tracks all goroutines for clean Stop()
 	devices       map[string]*trackedDevice // open /dev/input/event* fds, keyed by path
@@ -112,16 +117,28 @@ type trackedDevice struct {
 // descriptors, and the kernel dropped them when those descriptors closed.
 func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 	return &Capturer{
-		conn:      conn,
-		screen:    screen,
-		active:    true,
-		edgeSide:  edgeSide,
-		stopCh:    make(chan struct{}),
-		remoteW:   defaultRemoteWidth,
-		remoteH:   defaultRemoteHeight,
-		accelMult: defaultAccelMultiplier,
-		canSwitch: true, // allow first switch immediately
+		conn:        conn,
+		screen:      screen,
+		active:      true,
+		edgeSide:    edgeSide,
+		stopCh:      make(chan struct{}),
+		remoteW:     defaultRemoteWidth,
+		remoteH:     defaultRemoteHeight,
+		accelMult:   defaultAccelMultiplier,
+		canSwitch:   true, // allow first switch immediately
+		backendName: "auto",
 	}
+}
+
+// SetCaptureBackend selects automatic, X11, or portal capture. Configuration
+// validation rejects other values before a Capturer is created.
+func (c *Capturer) SetCaptureBackend(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if name == "" {
+		name = "auto"
+	}
+	c.backendName = name
 }
 
 // SetActive sets whether this machine currently owns the cursor.
@@ -166,12 +183,13 @@ func (c *Capturer) SafeEntryPosition() (x, y int32) {
 	y = c.screen.Height / 2
 	switch c.edgeSide {
 	case "left":
-		x = 100
+		x = c.screen.X + 100
 	case "right":
-		x = c.screen.Width - 100
+		x = c.screen.X + c.screen.Width - 100
 	default:
-		x = c.screen.Width / 2
+		x = c.screen.X + c.screen.Width/2
 	}
+	y += c.screen.Y
 	return x, y
 }
 
@@ -251,6 +269,27 @@ func (c *Capturer) SetAccelMultiplier(m float64) {
 	slog.Info("cursor acceleration multiplier set", "accel_multiplier", m)
 }
 
+// Reenter places the local pointer safely inside the shared edge. The portal
+// backend releases the compositor capture at this position; X11 keeps the
+// existing xdotool warp.
+func (c *Capturer) Reenter(x, y int32) error {
+	c.mu.Lock()
+	native := c.native
+	c.mu.Unlock()
+	if native != nil {
+		return native.Reenter(x, y)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--", fmt.Sprintf("%d", x), fmt.Sprintf("%d", y))
+	cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("xdotool mousemove: %w", err)
+	}
+	return nil
+}
+
 // Stop signals the capturer to stop and waits for all goroutines to exit.
 //
 // Closing the device descriptors is what restores local input: the kernel drops
@@ -260,6 +299,11 @@ func (c *Capturer) SetAccelMultiplier(m float64) {
 // the machine with no mouse and no keyboard.
 func (c *Capturer) Stop() {
 	close(c.stopCh)
+	if c.native != nil {
+		if err := c.native.Close(); err != nil {
+			slog.Warn("close native capture backend", "backend", c.native.Name(), "err", err)
+		}
+	}
 	// Close all device fds to unblock any goroutines stuck in f.Read().
 	// Without this, monitorDevice goroutines block indefinitely and accumulate
 	// across reconnect cycles (35 devices × N reconnects = goroutine storm).
@@ -279,6 +323,40 @@ func (c *Capturer) Stop() {
 // Run starts edge detection polling and evdev monitoring.
 // Validates all preconditions before starting any goroutines.
 func (c *Capturer) Run() error {
+	c.mu.Lock()
+	backendName := c.backendName
+	c.mu.Unlock()
+	usePortal := backendName == "portal" || (backendName == "auto" && portalBackendAvailable() && waylandSessionActive())
+	if usePortal {
+		native, err := portalCaptureFactory(c)
+		if err == nil {
+			c.mu.Lock()
+			c.native = native
+			c.screen = native.Screen()
+			c.mu.Unlock()
+			if err := native.Start(); err != nil {
+				c.mu.Lock()
+				c.native = nil
+				c.mu.Unlock()
+				_ = native.Close()
+				return fmt.Errorf("start portal capture: %w", err)
+			}
+			slog.Info("capture backend selected", "backend", native.Name(), "width", native.Screen().Width, "height", native.Screen().Height)
+			return nil
+		}
+		// Preserve the existing X11 path only when the portal is absent. A denied
+		// or broken portal setup is surfaced instead of silently bypassed.
+		if backendName == "auto" && errors.Is(err, errPortalCaptureUnavailable) {
+			slog.Warn("native Wayland capture is unavailable; keeping the X11 capture path", "err", err)
+			return c.runX11()
+		}
+		return fmt.Errorf("start portal capture: %w", err)
+	}
+
+	return c.runX11()
+}
+
+func (c *Capturer) runX11() error {
 	discover := c.findDevicesFn
 	if discover == nil {
 		discover = findInputDevices
@@ -312,6 +390,7 @@ func (c *Capturer) Run() error {
 	}
 	c.mu.Unlock()
 	slog.Info("classified input devices", "tracked", len(devices), "keyboards_and_pointers", targets)
+	slog.Info("capture backend selected", "backend", "x11")
 	return nil
 }
 
@@ -476,64 +555,89 @@ func (c *Capturer) pollCursorEdge() {
 			}
 
 			if switched {
-				now := time.Now()
-				if now.Sub(c.lastSwitch) < 100*time.Millisecond {
-					continue
-				}
-				c.lastSwitch = now
-
-				slog.Info("screen edge hit, switching to remote", "edge", c.edgeSide, "x", x, "y", y)
-
-				// Map local Y to remote entry point (proportional)
-				entryY := int32(float64(y) / float64(c.screen.Height) * 65535)
-				// Enter 200px inside the remote screen, not at the literal edge.
-				// Entering at exactly 0 or 65535 triggers Windows MWB's own edge
-				// detection immediately, bouncing the cursor straight back.
-				// 200px margin ≈ 200/1920 * 65535 ≈ 6826 units from the edge.
-				const edgeMargin = int32(6826)
-				entryX := edgeMargin // enter from left of remote, slightly inside
-				if c.edgeSide == "left" {
-					entryX = 65535 - edgeMargin // enter from right of remote, slightly inside
-				}
-
-				c.mu.Lock()
-				c.active = false
-				c.switchSent = time.Now()
-				c.edgeY = y
-				// Set virtual cursor offset from the return edge to prevent jitter bounce.
-				// Entry is 200px from the return edge — gives room for mouse momentum.
-				if c.edgeSide == "left" {
-					c.remoteX = c.remoteW - 200
-				} else {
-					c.remoteX = 200
-				}
-				c.remoteY = int32(float64(y) / float64(c.screen.Height) * float64(c.remoteH))
-				c.canReturn = false // must move away from return edge first
-				c.mu.Unlock()
-
-				// Suppress local input (synchronous — one ioctl per device)
-				c.applyIsolation()
-
-				// Send mouse burst to the entry position on remote
-				// Multiple packets help Windows MWB register the switch reliably
-				conn := c.conn
-				go func() {
-					for i := 0; i < 5; i++ {
-						mouse := &protocol.Packet{
-							Type: protocol.Mouse,
-							Src:  conn.MachineID,
-							Des:  conn.RemoteID,
-						}
-						mouse.Mouse.X = entryX
-						mouse.Mouse.Y = entryY
-						mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
-						_ = conn.SendPacket(mouse)
-						time.Sleep(5 * time.Millisecond)
-					}
-				}()
+				c.switchToRemote(y)
 			}
 		}
 	}
+}
+
+// switchToRemote performs the state transition shared by X11 polling and the
+// Wayland portal barrier callback. It returns false when a duplicate or stale
+// edge notification was ignored.
+func (c *Capturer) switchToRemote(y int32) bool {
+	now := time.Now()
+	c.mu.Lock()
+	if !c.active || now.Sub(c.lastSwitch) < 100*time.Millisecond {
+		c.mu.Unlock()
+		return false
+	}
+	screen := c.screen
+	remoteW := c.remoteW
+	remoteH := c.remoteH
+	edgeSide := c.edgeSide
+	if screen.Height <= 0 || remoteW <= 0 || remoteH <= 0 {
+		c.mu.Unlock()
+		return false
+	}
+	c.lastSwitch = now
+
+	normalizedY := y - screen.Y
+	if normalizedY < 0 {
+		normalizedY = 0
+	}
+	if normalizedY >= screen.Height {
+		normalizedY = screen.Height - 1
+	}
+	entryY := int32(float64(normalizedY) / float64(screen.Height) * 65535)
+	const edgeMargin = int32(6826)
+	entryX := edgeMargin
+	if edgeSide == "left" {
+		entryX = 65535 - edgeMargin
+	}
+
+	c.active = false
+	c.switchSent = now
+	c.edgeY = y
+	if edgeSide == "left" {
+		c.remoteX = remoteW - 200
+	} else {
+		c.remoteX = 200
+	}
+	c.remoteY = int32(float64(normalizedY) / float64(screen.Height) * float64(remoteH))
+	c.canReturn = false
+	c.mu.Unlock()
+
+	slog.Info("screen edge hit, switching to remote", "edge", edgeSide, "y", y)
+	c.applyIsolation()
+
+	conn := c.conn
+	if conn != nil {
+		c.mu.Lock()
+		startSender := !c.stopped
+		if startSender {
+			c.wg.Add(1)
+		}
+		c.mu.Unlock()
+		if startSender {
+			go func() {
+				defer c.wg.Done()
+				for i := 0; i < 5; i++ {
+					select {
+					case <-c.stopCh:
+						return
+					default:
+					}
+					mouse := &protocol.Packet{Type: protocol.Mouse, Src: conn.MachineID, Des: conn.RemoteID}
+					mouse.Mouse.X = entryX
+					mouse.Mouse.Y = entryY
+					mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
+					_ = conn.SendPacket(mouse)
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+		}
+	}
+	return true
 }
 
 var (
@@ -781,14 +885,7 @@ func parseEvent(buf []byte) inputEvent {
 }
 
 func (c *Capturer) handleEvent(ev inputEvent) {
-	if c.IsActive() {
-		return
-	}
-	// Suppress during switch grace period
-	c.mu.Lock()
-	grace := !c.switchSent.IsZero() && time.Since(c.switchSent) < 100*time.Millisecond
-	c.mu.Unlock()
-	if grace {
+	if !c.canForwardCapturedInput() {
 		return
 	}
 
@@ -798,6 +895,16 @@ func (c *Capturer) handleEvent(ev inputEvent) {
 	case evKey:
 		c.handleKey(ev)
 	}
+}
+
+func (c *Capturer) canForwardCapturedInput() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active {
+		return false
+	}
+	grace := !c.switchSent.IsZero() && time.Since(c.switchSent) < 100*time.Millisecond
+	return !grace
 }
 
 // applyAcceleration scales raw evdev deltas by mult. The Windows side does no
@@ -817,11 +924,21 @@ func applyAcceleration(delta int32, mult float64) int32 {
 
 func (c *Capturer) handleRel(ev inputEvent) {
 	c.mu.Lock()
+	multiplier := c.accelMult
+	c.mu.Unlock()
+	c.handleRelWithMultiplier(ev, multiplier)
+}
+
+func (c *Capturer) handleRelWithMultiplier(ev inputEvent, multiplier float64) {
+	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.active {
+		return
+	}
 
 	switch ev.Code {
 	case relX:
-		c.remoteX += applyAcceleration(ev.Value, c.accelMult)
+		c.remoteX += applyAcceleration(ev.Value, multiplier)
 		if c.remoteX < 0 {
 			c.remoteX = 0
 		}
@@ -829,7 +946,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 			c.remoteX = c.remoteW
 		}
 	case relY:
-		c.remoteY += applyAcceleration(ev.Value, c.accelMult)
+		c.remoteY += applyAcceleration(ev.Value, multiplier)
 		if c.remoteY < 0 {
 			c.remoteY = 0
 		}
@@ -881,6 +998,8 @@ func (c *Capturer) handleRel(ev inputEvent) {
 	if switchBack {
 		remY := c.remoteY
 		remH := c.remoteH
+		screen := c.screen
+		edgeSide := c.edgeSide
 		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
 		c.active = true
 		onActivated := c.OnActivated
@@ -894,19 +1013,15 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		// motion drives the cursor straight back into the edge, bouncing the
 		// switch. Move first, then hand input back.
 		var entryX int32
-		if c.edgeSide == "left" {
-			entryX = 100
+		if edgeSide == "left" {
+			entryX = screen.X + 100
 		} else {
-			entryX = c.screen.Width - 100
+			entryX = screen.X + screen.Width - 100
 		}
-		entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-			fmt.Sprintf("%d", entryX),
-			fmt.Sprintf("%d", entryY))
-		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
-		cancel()
+		entryY := screen.Y + int32(float64(remY)/float64(remH)*float64(screen.Height))
+		if err := c.Reenter(entryX, entryY); err != nil {
+			slog.Warn("place local cursor after return", "err", err)
+		}
 
 		c.applyIsolation()
 		if onActivated != nil {
@@ -923,16 +1038,17 @@ func (c *Capturer) handleRel(ev inputEvent) {
 }
 
 func (c *Capturer) handleKey(ev inputEvent) {
-	// Track Ctrl+Alt for hotkey — guarded by c.mu via handleEvent → monitorDevice path.
-	// Left/right Ctrl (29, 97) and Left/right Alt (56, 100).
+	// Track Ctrl+Alt across all keyboard device readers.
+	c.mu.Lock()
 	if ev.Code == 29 || ev.Code == 97 {
 		c.hotkeyCtrl = ev.Value == 1
 	}
 	if ev.Code == 56 || ev.Code == 100 {
 		c.hotkeyAlt = ev.Value == 1
 	}
-	// Ctrl+Alt+Right = force return to Ubuntu
-	if ev.Code == 106 && ev.Value == 1 && c.hotkeyCtrl && c.hotkeyAlt {
+	forceReturn := ev.Code == 106 && ev.Value == 1 && c.hotkeyCtrl && c.hotkeyAlt
+	c.mu.Unlock()
+	if forceReturn {
 		if !c.IsActive() {
 			slog.Info("hotkey Ctrl+Alt+Right: returning to Ubuntu")
 			c.SetActive(true)
@@ -941,45 +1057,22 @@ func (c *Capturer) handleKey(ev inputEvent) {
 	}
 
 	// Mouse buttons
-	if ev.Code >= 0x110 && ev.Code <= 0x112 {
-		if !c.IsActive() {
-			var flags int32
-			switch ev.Code {
-			case input.BTN_LEFT:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_LBUTTONDOWN
-				case 0:
-					flags = protocol.WM_LBUTTONUP
-				default:
-					return
-				}
-			case input.BTN_RIGHT:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_RBUTTONDOWN
-				case 0:
-					flags = protocol.WM_RBUTTONUP
-				default:
-					return
-				}
-			case input.BTN_MIDDLE:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_MBUTTONDOWN
-				case 0:
-					flags = protocol.WM_MBUTTONUP
-				default:
-					return
-				}
+	if ev.Code >= input.BTN_LEFT && ev.Code <= input.BTN_EXTRA {
+		c.mu.Lock()
+		if !c.active && c.remoteW > 0 && c.remoteH > 0 {
+			flags, buttonID, ok := mouseButtonMessage(ev.Code, ev.Value)
+			if !ok {
+				c.mu.Unlock()
+				return
 			}
 			// Use current virtual cursor position so clicks register at the
 			// correct location on Windows, not always at top-left (0,0).
-			c.mu.Lock()
 			absX := int32(float64(c.remoteX) / float64(c.remoteW) * 65535)
 			absY := int32(float64(c.remoteY) / float64(c.remoteH) * 65535)
 			c.mu.Unlock()
-			c.sendMouse(absX, absY, 0, flags)
+			c.sendMouse(absX, absY, buttonID, flags)
+		} else {
+			c.mu.Unlock()
 		}
 		return
 	}
@@ -1013,6 +1106,41 @@ func (c *Capturer) handleKey(ev inputEvent) {
 
 	if err := c.conn.SendPacket(pkt); err != nil {
 		slog.Debug("send keyboard failed", "err", err)
+	}
+}
+
+func mouseButtonMessage(code uint16, value int32) (flags, buttonID int32, ok bool) {
+	pressed := value == 1
+	if !pressed && value != 0 {
+		return 0, 0, false
+	}
+	switch code {
+	case input.BTN_LEFT:
+		if pressed {
+			return protocol.WM_LBUTTONDOWN, 0, true
+		}
+		return protocol.WM_LBUTTONUP, 0, true
+	case input.BTN_RIGHT:
+		if pressed {
+			return protocol.WM_RBUTTONDOWN, 0, true
+		}
+		return protocol.WM_RBUTTONUP, 0, true
+	case input.BTN_MIDDLE:
+		if pressed {
+			return protocol.WM_MBUTTONDOWN, 0, true
+		}
+		return protocol.WM_MBUTTONUP, 0, true
+	case input.BTN_SIDE, input.BTN_EXTRA:
+		buttonID = 1
+		if code == input.BTN_EXTRA {
+			buttonID = 2
+		}
+		if pressed {
+			return protocol.WM_XBUTTONDOWN, buttonID, true
+		}
+		return protocol.WM_XBUTTONUP, buttonID, true
+	default:
+		return 0, 0, false
 	}
 }
 

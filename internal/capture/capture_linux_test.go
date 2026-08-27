@@ -4,10 +4,65 @@ package capture
 
 import (
 	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lucky-verma/mwb-linux/internal/input"
+	"github.com/lucky-verma/mwb-linux/internal/protocol"
 )
+
+type fakeNativeCapture struct {
+	screen    ScreenInfo
+	startErr  error
+	started   bool
+	closed    bool
+	reentered bool
+	reenterX  int32
+	reenterY  int32
+}
+
+func (f *fakeNativeCapture) Name() string       { return "fake-native" }
+func (f *fakeNativeCapture) Screen() ScreenInfo { return f.screen }
+func (f *fakeNativeCapture) Start() error {
+	f.started = true
+	return f.startErr
+}
+func (f *fakeNativeCapture) Reenter(x, y int32) error {
+	f.reentered = true
+	f.reenterX = x
+	f.reenterY = y
+	return nil
+}
+func (f *fakeNativeCapture) Close() error {
+	f.closed = true
+	return nil
+}
+
+func liveWaylandSocket(t *testing.T) {
+	t.Helper()
+	path := t.TempDir() + "/wayland-test"
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen on fake Wayland socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	t.Setenv("WAYLAND_DISPLAY", path)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+}
+
+func withPortalTestSeams(t *testing.T, available func() bool, factory func(*Capturer) (nativeCapture, error)) {
+	t.Helper()
+	oldAvailable := portalBackendAvailable
+	oldFactory := portalCaptureFactory
+	portalBackendAvailable = available
+	portalCaptureFactory = factory
+	t.Cleanup(func() {
+		portalBackendAvailable = oldAvailable
+		portalCaptureFactory = oldFactory
+	})
+}
 
 type blockingPointer struct {
 	started   chan struct{}
@@ -50,6 +105,158 @@ func TestRunUsesPersistentPointerAndStopClosesIt(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Stop did not close the pointer and unblock cursor polling")
+	}
+}
+
+func TestRunAutoSelectsNativePortalOnLiveWayland(t *testing.T) {
+	liveWaylandSocket(t)
+	fake := &fakeNativeCapture{screen: ScreenInfo{X: -1280, Width: 3200, Height: 1080}}
+	withPortalTestSeams(t, func() bool { return true }, func(*Capturer) (nativeCapture, error) {
+		return fake, nil
+	})
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.findDevicesFn = func() ([]string, error) {
+		t.Fatal("native Wayland capture must not scan raw input devices")
+		return nil, nil
+	}
+
+	if err := c.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !fake.started {
+		t.Fatal("native backend was not started")
+	}
+	if got := c.screen; got != fake.screen {
+		t.Fatalf("screen = %+v, want %+v", got, fake.screen)
+	}
+	c.Stop()
+	if !fake.closed {
+		t.Fatal("Stop did not close native backend")
+	}
+}
+
+func TestRunAutoKeepsX11WhenPortalWasNotBuilt(t *testing.T) {
+	liveWaylandSocket(t)
+	withPortalTestSeams(t, func() bool { return false }, func(*Capturer) (nativeCapture, error) {
+		t.Fatal("auto must not select a portal backend that was not built")
+		return nil, nil
+	})
+	pointer := &blockingPointer{started: make(chan struct{}), closed: make(chan struct{})}
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.pointer = pointer
+	c.findDevicesFn = func() ([]string, error) { return nil, nil }
+
+	if err := c.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	c.Stop()
+}
+
+func TestRunExplicitPortalDoesNotFallBackToRawInput(t *testing.T) {
+	wantErr := errors.New("portal denied")
+	withPortalTestSeams(t, func() bool { return true }, func(*Capturer) (nativeCapture, error) {
+		return nil, wantErr
+	})
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.SetCaptureBackend("portal")
+	c.findDevicesFn = func() ([]string, error) {
+		t.Fatal("explicit portal failure must not fall back to raw input")
+		return nil, nil
+	}
+
+	if err := c.Run(); !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRunAutoFallsBackOnlyWhenPortalIsUnavailable(t *testing.T) {
+	liveWaylandSocket(t)
+	withPortalTestSeams(t, func() bool { return true }, func(*Capturer) (nativeCapture, error) {
+		return nil, errPortalCaptureUnavailable
+	})
+	pointer := &blockingPointer{started: make(chan struct{}), closed: make(chan struct{})}
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.pointer = pointer
+	c.findDevicesFn = func() ([]string, error) { return nil, nil }
+	if err := c.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	c.Stop()
+}
+
+func TestRunAutoDoesNotBypassPortalSetupFailure(t *testing.T) {
+	liveWaylandSocket(t)
+	wantErr := errors.New("portal permission was denied")
+	withPortalTestSeams(t, func() bool { return true }, func(*Capturer) (nativeCapture, error) {
+		return nil, wantErr
+	})
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.findDevicesFn = func() ([]string, error) {
+		t.Fatal("portal setup failure must not be hidden by raw input fallback")
+		return nil, nil
+	}
+	if err := c.Run(); !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRunClosesNativeBackendWhenStartFails(t *testing.T) {
+	wantErr := errors.New("enable failed")
+	fake := &fakeNativeCapture{screen: ScreenInfo{Width: 1920, Height: 1080}, startErr: wantErr}
+	withPortalTestSeams(t, func() bool { return true }, func(*Capturer) (nativeCapture, error) {
+		return fake, nil
+	})
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.SetCaptureBackend("portal")
+
+	if err := c.Run(); !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want %v", err, wantErr)
+	}
+	if !fake.closed {
+		t.Fatal("failed native backend was not closed")
+	}
+	c.mu.Lock()
+	native := c.native
+	c.mu.Unlock()
+	if native != nil {
+		t.Fatal("failed native backend remained attached")
+	}
+}
+
+func TestReenterUsesNativeBackend(t *testing.T) {
+	fake := &fakeNativeCapture{}
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.native = fake
+	if err := c.Reenter(123, 456); err != nil {
+		t.Fatalf("Reenter: %v", err)
+	}
+	if !fake.reentered || fake.reenterX != 123 || fake.reenterY != 456 {
+		t.Fatalf("native Reenter = (%d, %d), called=%v", fake.reenterX, fake.reenterY, fake.reentered)
+	}
+}
+
+func TestMouseButtonMessageIncludesSideButtons(t *testing.T) {
+	tests := []struct {
+		code     uint16
+		value    int32
+		flags    int32
+		buttonID int32
+	}{
+		{input.BTN_LEFT, 1, protocol.WM_LBUTTONDOWN, 0},
+		{input.BTN_LEFT, 0, protocol.WM_LBUTTONUP, 0},
+		{input.BTN_SIDE, 1, protocol.WM_XBUTTONDOWN, 1},
+		{input.BTN_SIDE, 0, protocol.WM_XBUTTONUP, 1},
+		{input.BTN_EXTRA, 1, protocol.WM_XBUTTONDOWN, 2},
+		{input.BTN_EXTRA, 0, protocol.WM_XBUTTONUP, 2},
+	}
+	for _, test := range tests {
+		flags, buttonID, ok := mouseButtonMessage(test.code, test.value)
+		if !ok || flags != test.flags || buttonID != test.buttonID {
+			t.Fatalf("mouseButtonMessage(%#x, %d) = (%#x, %d, %v)", test.code, test.value, flags, buttonID, ok)
+		}
+	}
+	if _, _, ok := mouseButtonMessage(input.BTN_LEFT, 2); ok {
+		t.Fatal("button auto-repeat value should be ignored")
 	}
 }
 

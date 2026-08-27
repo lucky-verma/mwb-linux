@@ -42,7 +42,7 @@ fi
 
 echo "[1/6] Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl xdotool xclip x11-xserver-utils > /dev/null
+apt-get install -y -qq ca-certificates curl xdotool xclip wl-clipboard x11-xserver-utils > /dev/null
 echo "  Done."
 
 echo "[2/6] Configuring input permissions..."

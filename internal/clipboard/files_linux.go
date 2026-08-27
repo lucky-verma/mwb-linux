@@ -3,10 +3,7 @@
 package clipboard
 
 import (
-	"context"
 	"net/url"
-	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -18,7 +15,7 @@ const (
 	gnomeFileTarget = "x-special/gnome-copied-files"
 )
 
-// getLocalFileClipboard returns local paths when the X clipboard holds a file
+// getLocalFileClipboard returns local paths when the desktop clipboard holds a file
 // selection, and nil otherwise.
 //
 // File managers advertise a copied file as text/uri-list. They also usually
@@ -26,37 +23,19 @@ const (
 // the text path: sending the filename as text instead of the file is the wrong
 // behaviour and is what happens without this.
 func (m *Manager) getLocalFileClipboard() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	defer cancel()
-	targetCmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-	targetCmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	targets, err := targetCmd.Output()
-	if err != nil {
+	if m.backend == nil {
 		return nil
 	}
-	target := clipboardFileTarget(string(targets))
-	if target == "" {
-		return nil
-	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-	defer cancel2()
-	readCmd := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", target, "-o")
-	readCmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	out, err := readCmd.Output()
-	if err != nil {
-		return nil
-	}
-	return parseFileURIs(string(out))
+	return m.backend.readFiles()
 }
 
 func clipboardFileTarget(targets string) string {
 	// GNOME's target includes whether the operation is copy or cut and is what
 	// Nautilus consumes for Ctrl+V. Prefer it when both are offered.
-	if strings.Contains(targets, gnomeFileTarget) {
+	if hasClipboardTarget(targets, gnomeFileTarget) {
 		return gnomeFileTarget
 	}
-	if strings.Contains(targets, uriListTarget) {
+	if hasClipboardTarget(targets, uriListTarget) {
 		return uriListTarget
 	}
 	return ""

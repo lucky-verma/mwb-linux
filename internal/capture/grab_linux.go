@@ -61,6 +61,13 @@ func testBit(bits []byte, n uint) bool {
 	return bits[idx]&(1<<(n%8)) != 0
 }
 
+// hasRelativePointerAxes identifies the motion node of a mouse or trackball.
+// Some USB receivers expose movement and buttons on different evdev nodes, so
+// requiring BTN_MOUSE on the movement node drops real pointer motion.
+func hasRelativePointerAxes(relBits []byte) bool {
+	return testBit(relBits, relX) && testBit(relBits, relY)
+}
+
 // capabilityBits reads the capability bitmask for one event type off an open
 // evdev fd. A zeroed slice is returned when the device reports nothing.
 func capabilityBits(f *os.File, evType uint, maxCode uint) ([]byte, error) {
@@ -124,9 +131,11 @@ func isGrabTarget(f *os.File) bool {
 		return false
 	}
 
-	// Relative pointer: REL_X + REL_Y + BTN_MOUSE, matching udev's is_mouse.
+	// Relative pointer: both motion axes are sufficient. Unlike absolute X/Y,
+	// relative X/Y are not used by ordinary joysticks or gamepads. Do not require
+	// BTN_MOUSE here: split-interface mice can expose buttons on another node.
 	if relBits, err := capabilityBits(f, evRel, relMax); err == nil {
-		if testBit(relBits, relX) && testBit(relBits, relY) && testBit(keyBits, btnMouse) {
+		if hasRelativePointerAxes(relBits) {
 			return true
 		}
 	}
