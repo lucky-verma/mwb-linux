@@ -76,6 +76,32 @@ func TestTestBit_EmptyBitmask(t *testing.T) {
 	}
 }
 
+func TestHasRelativePointerAxes(t *testing.T) {
+	tests := []struct {
+		name  string
+		codes []uint
+		want  bool
+	}{
+		{name: "split mouse movement node", codes: []uint{relX, relY}, want: true},
+		{name: "x axis only", codes: []uint{relX}, want: false},
+		{name: "y axis only", codes: []uint{relY}, want: false},
+		{name: "wheel only", codes: []uint{relWheel}, want: false},
+		{name: "no relative capabilities", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bits := make([]byte, relMax/8+1)
+			for _, code := range tc.codes {
+				bits[code/8] |= 1 << (code % 8)
+			}
+			if got := hasRelativePointerAxes(bits); got != tc.want {
+				t.Fatalf("hasRelativePointerAxes() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // --- release idempotency ---
 
 // Releasing runs on every return-to-local, including paths where no grab was
