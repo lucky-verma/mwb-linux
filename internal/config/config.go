@@ -23,6 +23,13 @@ type Config struct {
 	// FileTransfer controls the MWB file copy channel. nil = enabled.
 	FileTransfer *bool `toml:"file_transfer"`
 
+	// LegacyCrypto selects the stream encryption PowerToys used before 0.101: a
+	// PBKDF2 salt and AES IV both fixed at build time, at 50,000 iterations.
+	// Current PowerToys sends a random salt and IV in the clear ahead of the
+	// ciphertext and derives at 100,000 iterations. nil = current scheme; set
+	// this only when the Windows peer is pinned to an older PowerToys.
+	LegacyCrypto *bool `toml:"legacy_crypto"`
+
 	// FileDir is retained only so older configs continue to decode. Clipboard
 	// files now use private cache staging and appear in a chosen folder on paste;
 	// writing every copied file into a visible directory was incorrect MWB UX.
@@ -148,6 +155,13 @@ func (c *Config) ClipboardEnabled() bool {
 // An absent setting is treated as enabled, matching clipboard.
 func (c *Config) FileTransferEnabled() bool {
 	return c.FileTransfer == nil || *c.FileTransfer
+}
+
+// LegacyCryptoEnabled reports whether to speak the pre-0.101 PowerToys stream
+// encryption. An absent setting means the current scheme, which is what a
+// stock, up-to-date Windows peer speaks.
+func (c *Config) LegacyCryptoEnabled() bool {
+	return c.LegacyCrypto != nil && *c.LegacyCrypto
 }
 
 // FileDirectory resolves the legacy direct-download directory.

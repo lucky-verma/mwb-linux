@@ -44,9 +44,17 @@ restarts.
 
 The implementation follows the PowerToys MWB protocol for compatibility:
 
-- PBKDF2-SHA512 derives a 32-byte key from the shared security key.
-- Each direction exchanges an IV before encrypted traffic begins.
+- Each direction opens with a 32-byte cleartext header: a 16-byte PBKDF2 salt
+  followed by the 16-byte AES IV for that direction. Both are random per
+  connection. A peer writes its own header before reading the other's, since
+  PowerToys creates its two streams lazily and may read before it writes.
+- PBKDF2-SHA512 at 100,000 iterations derives a 32-byte key from the shared
+  security key and the salt in that header.
 - AES-256-CBC protects the stream.
+- Each direction then exchanges a random 16-byte block before protocol traffic
+  begins.
+- PowerToys used a fixed salt and IV at 50,000 iterations before 0.101. Set
+  `legacy_crypto = true` for a Windows peer pinned to an older build.
 - Both peers exchange `Handshake` challenges and matching `HandshakeAck`
   responses.
 - A `HeartbeatEx` broadcast registers the Linux machine in the PowerToys

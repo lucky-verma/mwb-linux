@@ -114,6 +114,13 @@ func main() {
 	clipboardEnabled := cfg.ClipboardEnabled() && !*noClipboard
 	keyboardLayout := input.ResolveKeyboardLayout(cfg.KeyboardLayout)
 
+	// PowerToys 0.101 changed the stream encryption. Pick the scheme before any
+	// connection is attempted.
+	network.SetLegacyCrypto(cfg.LegacyCryptoEnabled())
+	if cfg.LegacyCryptoEnabled() {
+		slog.Warn("legacy_crypto is set: using the stream encryption PowerToys used before 0.101")
+	}
+
 	slog.Debug("debug logging enabled")
 	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional, "edge", *edgeSide, "clipboard", clipboardEnabled, "keyboard_layout", keyboardLayout)
 

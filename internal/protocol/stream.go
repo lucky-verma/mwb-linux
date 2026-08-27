@@ -4,6 +4,7 @@ package protocol
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"fmt"
 	"io"
 )
@@ -71,4 +72,33 @@ func (d *DecryptReader) Read(p []byte) (int, error) {
 		return len(p), nil
 	}
 	return nn, nil
+}
+
+// NewEncryptWriterWithHeader starts an outbound PowerToys-compatible encrypted
+// stream: it generates a random per-connection salt and IV, writes them to w in
+// the clear, then returns a writer keyed from securityKey and that salt.
+//
+// The header goes out before any ciphertext, so callers must create the writer
+// (and flush anything they owe the peer) before blocking on a read — see
+// NewDecryptReaderWithHeader.
+func NewEncryptWriterWithHeader(w io.Writer, securityKey string) (*EncryptWriter, error) {
+	header := make([]byte, HeaderSize)
+	if _, err := rand.Read(header); err != nil {
+		return nil, fmt.Errorf("generate encryption header: %w", err)
+	}
+	if _, err := w.Write(header); err != nil {
+		return nil, fmt.Errorf("send encryption header: %w", err)
+	}
+	return NewEncryptWriter(w, DeriveKeyWithSalt(securityKey, header[:SaltSize]), header[SaltSize:])
+}
+
+// NewDecryptReaderWithHeader reads the peer's cleartext salt+IV header from r
+// and returns a reader that decrypts the rest of the stream with the key that
+// header implies. It blocks until the peer has sent its header.
+func NewDecryptReaderWithHeader(r io.Reader, securityKey string) (*DecryptReader, error) {
+	header := make([]byte, HeaderSize)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return nil, fmt.Errorf("read encryption header: %w", err)
+	}
+	return NewDecryptReader(r, DeriveKeyWithSalt(securityKey, header[:SaltSize]), header[SaltSize:])
 }
