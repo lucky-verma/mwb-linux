@@ -267,6 +267,7 @@ keep the client on a trusted network segment.
 | `file_transfer` | true | Enable the MWB file copy channel. Keep `clipboard = true`: clipboard events trigger transfers in both directions |
 | `file_dir` | — | Deprecated and ignored. Windows files use hidden clipboard backing storage under `$XDG_CACHE_HOME/mwb/clipboard` and a native GNOME/generic file selection, then appear in a visible folder only on paste |
 | `max_file_size` | 104857600 | Per-transfer cap in bytes. The default matches MWB's own 100 MB limit; a stock Windows peer neither sends nor accepts more |
+| `legacy_crypto` | false | Use the stream encryption PowerToys used before 0.101 (fixed salt and IV, 50,000 PBKDF2 iterations). Only needed for a Windows peer pinned to an older PowerToys |
 | `keyboard_layout` | auto | Inbound Windows-to-Linux keyboard mapping. `auto` detects the local Linux layout when possible; supported profiles include `us`, `de`, `fr`, `be`, `es`, `it`, `gb`, `pt`, `no`/`dk`/`se`/`fi`, `ch`, and `nl` |
 | `capture_backend` | auto | Bidirectional capture backend: `auto`, `x11`, or `portal`. `portal` requires a source build with the experimental `wayland_portal` tag |
 

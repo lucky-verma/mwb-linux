@@ -244,3 +244,40 @@ key = "SomeKeyHere!1234"
 		t.Fatalf("config permissions = %04o, want 0600", got)
 	}
 }
+
+func TestLegacyCryptoDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LegacyCryptoEnabled() {
+		t.Error("an absent legacy_crypto should mean the current PowerToys scheme")
+	}
+}
+
+func TestLegacyCryptoEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+host = "10.0.0.1"
+key = "SomeKeyHere!1234"
+legacy_crypto = true
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.LegacyCryptoEnabled() {
+		t.Error("legacy_crypto = true should select the pre-0.101 scheme")
+	}
+}

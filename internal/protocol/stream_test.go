@@ -87,3 +87,65 @@ func TestEncryptedStreamMultipleBlocks(t *testing.T) {
 		t.Error("packet 2 mismatch")
 	}
 }
+
+// TestHeaderStreamRoundTrip covers the wire format PowerToys has used since it
+// moved to a per-connection salt and IV: 32 cleartext bytes, then ciphertext.
+func TestHeaderStreamRoundTrip(t *testing.T) {
+	const securityKey = "TestSecurityKey!!"
+	plaintext := bytes.Repeat([]byte("mwb protocol data"), 4)[:64]
+
+	var wire bytes.Buffer
+	enc, err := NewEncryptWriterWithHeader(&wire, securityKey)
+	if err != nil {
+		t.Fatalf("NewEncryptWriterWithHeader: %v", err)
+	}
+	if _, err := enc.Write(plaintext); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// The header must be on the wire ahead of the ciphertext, in the clear.
+	if got, want := wire.Len(), HeaderSize+len(plaintext); got != want {
+		t.Fatalf("wire length = %d, want %d", got, want)
+	}
+	if bytes.Equal(wire.Bytes()[HeaderSize:], plaintext) {
+		t.Error("payload was written in the clear")
+	}
+
+	dec, err := NewDecryptReaderWithHeader(bytes.NewReader(wire.Bytes()), securityKey)
+	if err != nil {
+		t.Fatalf("NewDecryptReaderWithHeader: %v", err)
+	}
+	got := make([]byte, len(plaintext))
+	if _, err := io.ReadFull(dec, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("round trip = %q, want %q", got, plaintext)
+	}
+}
+
+// A reader keyed with the wrong security key must not recover the plaintext,
+// even though it parses the same cleartext header.
+func TestHeaderStreamWrongKey(t *testing.T) {
+	var wire bytes.Buffer
+	enc, err := NewEncryptWriterWithHeader(&wire, "TestSecurityKey!!")
+	if err != nil {
+		t.Fatalf("NewEncryptWriterWithHeader: %v", err)
+	}
+	plaintext := bytes.Repeat([]byte{0xAB}, 32)
+	if _, err := enc.Write(plaintext); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	dec, err := NewDecryptReaderWithHeader(bytes.NewReader(wire.Bytes()), "WrongSecurityKey!")
+	if err != nil {
+		t.Fatalf("NewDecryptReaderWithHeader: %v", err)
+	}
+	got := make([]byte, len(plaintext))
+	if _, err := io.ReadFull(dec, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if bytes.Equal(got, plaintext) {
+		t.Error("wrong key decrypted the payload")
+	}
+}
