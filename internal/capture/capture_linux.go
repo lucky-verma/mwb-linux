@@ -5,7 +5,6 @@
 package capture
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -46,11 +45,11 @@ const (
 	// 2px jump plus rounding, but narrow enough to reject the opposite far edge.
 	reclaimEdgeMargin = 8192
 
-	// remoteReturnMargin is in remote-screen pixels, not 0-65535 wire units.
-	// It must be smaller than the 200px remote entry offset, otherwise a
-	// MachineSwitched notification at the entry position can bounce straight
-	// back before the cursor reaches the real shared edge.
-	remoteReturnMargin = 64
+	// Land 50 pixels inside the local screen and 8% inside the remote desktop.
+	entryClearance      = 50
+	remoteEntryFraction = 5243
+	rearmDistance       = 20
+	remoteReturnMargin  = 32
 )
 
 type inputEvent struct {
@@ -144,6 +143,7 @@ func (c *Capturer) SetActive(active bool) {
 	// applyIsolation acquires c.mu internally — must be called after unlock.
 	// Calling it under the lock caused a deadlock that froze all goroutines.
 	if shouldEnable {
+		c.recenter()
 		c.applyIsolation()
 		if onActivated != nil {
 			onActivated()
@@ -158,21 +158,55 @@ func (c *Capturer) IsActive() bool {
 	return c.active
 }
 
-// SafeEntryPosition returns a cursor position 100px inside from the switch edge,
+// SafeEntryPosition returns a cursor position inside from the switch edge,
 // safe to move to after MachineSwitched without immediately re-triggering the edge.
 func (c *Capturer) SafeEntryPosition() (x, y int32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	y = c.screen.Height / 2
+	if c.remoteH > 0 {
+		y = max(0, min(c.screen.Height-1, int32(int64(c.remoteY)*int64(c.screen.Height)/int64(c.remoteH))))
+	}
+	inset := entryInset(c.screen.Width)
 	switch c.edgeSide {
 	case "left":
-		x = 100
+		x = inset
 	case "right":
-		x = c.screen.Width - 100
+		x = c.screen.Width - inset
 	default:
 		x = c.screen.Width / 2
 	}
 	return x, y
+}
+
+// recenter runs before releasing grabbed input on every local return path.
+func (c *Capturer) recenter() {
+	if c.pointer == nil {
+		return
+	}
+	x, y := c.SafeEntryPosition()
+	if err := c.pointer.MoveTo(x, y); err != nil {
+		slog.Warn("could not recenter cursor before releasing input", "err", err)
+	}
+}
+
+// entryInset bounds the shared edge clearance for narrow screens.
+func entryInset(width int32) int32 {
+	return max(1, min(int32(entryClearance), (width-1)/2))
+}
+
+func remoteEntryInset(width int32) int32 {
+	return max(1, int32((int64(width)*remoteEntryFraction+32767)/65535))
+}
+
+// remoteEntryLocked keeps the initial wire landing and virtual cursor aligned.
+func (c *Capturer) remoteEntryLocked() (pixel, wire int32) {
+	pixel = remoteEntryInset(c.remoteW)
+	if c.edgeSide == "left" {
+		pixel = c.remoteW - pixel
+	}
+	wire = int32(int64(pixel) * 65535 / int64(c.remoteW))
+	return
 }
 
 // AcceptsReclaim reports whether a remote NextMachine request is returning
@@ -209,11 +243,13 @@ func (c *Capturer) AcceptsActivation() bool {
 		remoteW = defaultRemoteWidth
 	}
 
+	// A smaller landing must not fall inside the accepted return margin.
+	margin := min(int32(remoteReturnMargin), remoteEntryInset(remoteW)/2)
 	switch c.edgeSide {
 	case "left":
-		return c.remoteX >= remoteW-remoteReturnMargin
+		return c.remoteX >= remoteW-margin
 	case "right":
-		return c.remoteX <= remoteReturnMargin
+		return c.remoteX <= margin
 	default:
 		return true
 	}
@@ -447,7 +483,7 @@ func (c *Capturer) pollCursorEdge() {
 			// Track whether cursor has been away from the edge since activation
 			// This prevents loops: cursor must move inward first, then back to edge
 			c.mu.Lock()
-			edgeZone := int32(20) // pixels from edge — must move this far inward to re-arm
+			edgeZone := int32(rearmDistance) // pixels from edge — must move this far inward to re-arm
 			switch c.edgeSide {
 			case "left":
 				if x > edgeZone {
@@ -486,27 +522,14 @@ func (c *Capturer) pollCursorEdge() {
 
 				// Map local Y to remote entry point (proportional)
 				entryY := int32(float64(y) / float64(c.screen.Height) * 65535)
-				// Enter 200px inside the remote screen, not at the literal edge.
-				// Entering at exactly 0 or 65535 triggers Windows MWB's own edge
-				// detection immediately, bouncing the cursor straight back.
-				// 200px margin ≈ 200/1920 * 65535 ≈ 6826 units from the edge.
-				const edgeMargin = int32(6826)
-				entryX := edgeMargin // enter from left of remote, slightly inside
-				if c.edgeSide == "left" {
-					entryX = 65535 - edgeMargin // enter from right of remote, slightly inside
-				}
 
 				c.mu.Lock()
 				c.active = false
 				c.switchSent = time.Now()
 				c.edgeY = y
-				// Set virtual cursor offset from the return edge to prevent jitter bounce.
-				// Entry is 200px from the return edge — gives room for mouse momentum.
-				if c.edgeSide == "left" {
-					c.remoteX = c.remoteW - 200
-				} else {
-					c.remoteX = 200
-				}
+				// Use the same pixel position for the initial burst and motion.
+				pixelX, entryX := c.remoteEntryLocked()
+				c.remoteX = pixelX
 				c.remoteY = int32(float64(y) / float64(c.screen.Height) * float64(c.remoteH))
 				c.canReturn = false // must move away from return edge first
 				c.mu.Unlock()
@@ -765,6 +788,15 @@ func (c *Capturer) monitorDevice(f *os.File) {
 
 		for off := 0; off+inputEventSize <= n; off += inputEventSize {
 			ev := parseEvent(buf[off : off+inputEventSize])
+			if ev.Type == uint16(evAbsType) {
+				c.mu.Lock()
+				d := c.devices[f.Name()]
+				recoverAbsolute := d != nil && d.grab && d.grabbed
+				c.mu.Unlock()
+				if !recoverAbsolute {
+					continue
+				}
+			}
 			c.handleEvent(ev)
 		}
 	}
@@ -793,6 +825,11 @@ func (c *Capturer) handleEvent(ev inputEvent) {
 	}
 
 	switch ev.Type {
+	case uint16(evAbsType):
+		// Raw absolute movement cannot be forwarded. Return local control
+		// explicitly without altering the normal mouse-switching paths.
+		slog.Warn("absolute pointer forwarding is unsupported; restoring local input")
+		c.SetActive(true)
 	case evRel:
 		c.handleRel(ev)
 	case evKey:
@@ -843,9 +880,9 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		return
 	}
 
-	// canReturn gate: must move 200px away from return edge before allowing return.
+	// Like the local edge gate, require deliberate inward movement before return.
 	// This prevents jitter/momentum from the initial switch from bouncing back.
-	returnZone := int32(200)
+	returnZone := remoteEntryInset(c.remoteW)
 	switch c.edgeSide {
 	case "left":
 		if c.remoteX < c.remoteW-returnZone {
@@ -880,7 +917,6 @@ func (c *Capturer) handleRel(ev inputEvent) {
 
 	if switchBack {
 		remY := c.remoteY
-		remH := c.remoteH
 		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
 		c.active = true
 		onActivated := c.OnActivated
@@ -893,20 +929,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 		// Ordering is load-bearing: release first and in-flight physical mouse
 		// motion drives the cursor straight back into the edge, bouncing the
 		// switch. Move first, then hand input back.
-		var entryX int32
-		if c.edgeSide == "left" {
-			entryX = 100
-		} else {
-			entryX = c.screen.Width - 100
-		}
-		entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-			fmt.Sprintf("%d", entryX),
-			fmt.Sprintf("%d", entryY))
-		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
-		cancel()
+		c.recenter()
 
 		c.applyIsolation()
 		if onActivated != nil {

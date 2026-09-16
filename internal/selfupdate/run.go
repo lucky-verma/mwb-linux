@@ -31,6 +31,11 @@ type Options struct {
 
 // Run performs the check-and-install flow and explains what it did.
 func Run(ctx context.Context, opts Options) error {
+	if !opts.CheckOnly {
+		if err := validateRestart(opts.Restart, os.Geteuid()); err != nil {
+			return err
+		}
+	}
 	out := opts.Out
 	if out == nil {
 		out = os.Stdout
@@ -138,6 +143,14 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	say("\nInstalled %s to %s\n", rel.Version, exePath)
 
+	// A root invocation cannot reliably reach the invoking user's session bus.
+	// Do not claim --restart succeeded against root's unrelated user manager.
+	if os.Geteuid() == 0 {
+		say("\nTo activate the update, run as your desktop user (without sudo):\n\n")
+		say("    systemctl --user restart %s\n", unitName)
+		return nil
+	}
+
 	// The old inode keeps running until the service is restarted.
 	if unit, running := runningUnit(ctx); running && opts.Restart {
 		say("Restarting %s…\n", unit)
@@ -150,6 +163,14 @@ func Run(ctx context.Context, opts Options) error {
 		say("    systemctl --user restart %s\n", unit)
 	} else {
 		say("\nRestart any running mwb process to pick up the new version.\n")
+	}
+	return nil
+}
+
+// validateRestart prevents targeting root's user manager after sudo.
+func validateRestart(restart bool, euid int) error {
+	if restart && euid == 0 {
+		return fmt.Errorf("--restart requires your desktop session: run sudo mwb update, then run systemctl --user restart mwb.service without sudo")
 	}
 	return nil
 }

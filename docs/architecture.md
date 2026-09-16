@@ -101,6 +101,14 @@ edge, MWB Linux:
 4. Returns control when that virtual cursor reaches the shared return edge.
 5. Moves the Linux cursor safely inside the screen before releasing grabs.
 
+Cursor entry uses 8% of the configured remote desktop width when entering
+Windows and a 50-pixel inset when returning to Linux. The initial Windows
+packet and the tracked virtual cursor use the same position. Linux returns
+preserve the tracked vertical position and use the existing X11 connection to
+move the cursor before releasing input. Both directions retain the inward
+movement gate before another crossing can trigger. These are internal defaults,
+not additional configuration options.
+
 `EVIOCGRAB` is tied to each open file descriptor. The kernel releases it if the
 process exits or crashes, so input recovery does not depend on a cleanup
 command running successfully.
