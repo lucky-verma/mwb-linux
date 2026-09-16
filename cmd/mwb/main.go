@@ -6,10 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -205,7 +206,7 @@ func main() {
 	go func() {
 		for {
 			// Race: try outbound connect AND accept inbound — first one wins
-			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.MessagePort())
+			addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.MessagePort()))
 			slog.Info("connecting", "addr", addr)
 
 			connectStop := make(chan struct{})
@@ -243,7 +244,7 @@ func main() {
 					sender := network.FileSender{
 						// The clipboard port, not addr: that one is the
 						// control channel and MWB answers it with a Handshake.
-						Addr:        fmt.Sprintf("%s:%d", cfg.Host, cfg.ClipboardPort()),
+						Addr:        net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.ClipboardPort())),
 						SecurityKey: cfg.Key,
 						MachineName: cfg.Name,
 						MachineID:   conn.MachineID,
@@ -290,34 +291,9 @@ func main() {
 				}
 				handler.ShouldActivate = cap.AcceptsActivation
 
-				// When we receive MachineSwitched, mark ourselves as active and
-				// move cursor away from edge — without this the cursor stays at
-				// x=0 and re-triggers the edge switch immediately on any movement.
-				handler.OnActivated = func() {
-					cap.SetActive(true)
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-						defer cancel()
-						entryX, entryY := cap.SafeEntryPosition()
-						_ = exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-							fmt.Sprintf("%d", entryX),
-							fmt.Sprintf("%d", entryY)).Run()
-					}()
-				}
-
-				// When server sends NextMachine (cursor bounced off server's edge),
-				// reclaim control and move cursor away from our edge
-				handler.OnReclaimed = func() {
-					cap.SetActive(true)
-					// Move cursor to center so it doesn't immediately re-trigger edge
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-						defer cancel()
-						_ = exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-							fmt.Sprintf("%d", screen.Width/2),
-							fmt.Sprintf("%d", screen.Height/2)).Run()
-					}()
-				}
+				// Recenter at the configured edge before releasing input.
+				handler.OnActivated = func() { cap.SetActive(true) }
+				handler.OnReclaimed = func() { cap.SetActive(true) }
 
 				if err := cap.Run(); err != nil {
 					slog.Error("capture start failed", "err", err)

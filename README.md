@@ -159,8 +159,12 @@ A source build reports version `dev`, which cannot be ordered against a release.
 The updater therefore refuses to replace it unless `--force` is supplied.
 
 If mwb was installed from the `.deb`, `mwb update` will not overwrite it behind
-dpkg's back; it prints the `apt` command to use instead. If the binary lives
+dpkg's back; it points to the release `.deb` and the `dpkg` command instead. If the binary lives
 somewhere only root can write, it tells you to re-run with `sudo`.
+
+If updating requires `sudo`, run `sudo mwb update`, then run
+`systemctl --user restart mwb.service` as your desktop user without sudo.
+`sudo mwb update --restart` is rejected because it targets root's user manager.
 
 The running service keeps using the old binary until it is restarted. Pass
 `--restart` to do that after a successful update, or restart it separately:
@@ -303,6 +307,10 @@ keep the client on a trusted network segment.
 - **"Block screen saver on other machines"** set to **ON** (recommended, keeps connection alive)
 - Security key shared with Linux client
 - Windows Firewall must allow ports **15100-15101** (TCP inbound/outbound)
+
+Absolute touchpad/tablet motion is not forwarded by the raw evdev capture
+backend. If such a device is used while input is grabbed, mwb restores local
+control and logs a warning. Use a relative mouse for Linux-to-Windows control.
 
 ## Troubleshooting
 

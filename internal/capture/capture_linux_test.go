@@ -4,6 +4,7 @@ package capture
 
 import (
 	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,8 @@ func (p *blockingPointer) Position() (int32, int32, error) {
 	<-p.closed
 	return -1, -1, errors.New("pointer closed")
 }
+
+func (p *blockingPointer) MoveTo(x, y int32) error { return nil }
 
 func (p *blockingPointer) Close() {
 	p.closeOnce.Do(func() { close(p.closed) })
@@ -104,8 +107,8 @@ func TestApplyAcceleration_Multiplier(t *testing.T) {
 func TestSafeEntryPosition_LeftEdge(t *testing.T) {
 	c := &Capturer{screen: ScreenInfo{Width: 2560, Height: 1440}, edgeSide: "left"}
 	x, y := c.SafeEntryPosition()
-	// Must be 100px from left edge — not at x=0 which immediately re-triggers switch
-	if x < 50 {
+	// Land just inside the edge, without a large visible jump.
+	if x != entryClearance {
 		t.Errorf("left edge: x=%d too close to edge, cursor will re-trigger switch", x)
 	}
 	// Y should be somewhere reasonable (not 0, not at edge)
@@ -117,8 +120,8 @@ func TestSafeEntryPosition_LeftEdge(t *testing.T) {
 func TestSafeEntryPosition_RightEdge(t *testing.T) {
 	c := &Capturer{screen: ScreenInfo{Width: 2560, Height: 1440}, edgeSide: "right"}
 	x, y := c.SafeEntryPosition()
-	// Must be 100px from right edge
-	if x > 2560-50 {
+	// Use the same clearance on the right.
+	if x != 2560-entryClearance {
 		t.Errorf("right edge: x=%d too close to right edge, cursor will re-trigger switch", x)
 	}
 	if y <= 0 || y >= 1440 {
@@ -302,5 +305,77 @@ func TestCanSwitchGate_RequiresMoveAwayFromEdge(t *testing.T) {
 
 	if !armed {
 		t.Error("canSwitch should arm when cursor moves 100px away from edge")
+	}
+}
+
+func TestAbsolutePointerRestoresLocalInput(t *testing.T) {
+	c, grabbed := newFakeIsolated(t, 1)
+	c.applyIsolation()
+	if grabbed() != 1 {
+		t.Fatal("device not isolated")
+	}
+	c.handleEvent(inputEvent{Type: uint16(evAbsType), Code: uint16(absX), Value: 123})
+	if !c.IsActive() || grabbed() != 0 || c.canSwitch {
+		t.Fatal("absolute pointer did not restore input with bounce gate closed")
+	}
+}
+
+func TestRemoteLandingMatchesTrackedPositionAndRejectsBounce(t *testing.T) {
+	for _, width := range []int32{1920, 2560, 3840} {
+		for _, edge := range []string{"left", "right"} {
+			c := New(nil, ScreenInfo{Width: width, Height: 1080}, edge)
+			c.remoteW = width
+			pixel, wire := c.remoteEntryLocked()
+			want := int32((int64(width)*5243 + 32767) / 65535)
+			if edge == "left" {
+				want = width - want
+			}
+			if pixel != want {
+				t.Fatalf("landing=%d want %d", pixel, want)
+			}
+			if wire != int32(int64(pixel)*65535/int64(width)) {
+				t.Fatal("wire and tracked positions disagree")
+			}
+			c.active, c.remoteX = false, pixel
+			if c.AcceptsActivation() {
+				t.Fatal("accepted a bounce at entry")
+			}
+			if edge == "left" {
+				c.remoteX = width - 1
+			} else {
+				c.remoteX = 0
+			}
+			if !c.AcceptsActivation() {
+				t.Fatal("rejected shared-edge return")
+			}
+		}
+	}
+}
+
+type recordingPointer struct {
+	x, y  int32
+	moved bool
+}
+
+func (p *recordingPointer) Position() (int32, int32, error) { return p.x, p.y, nil }
+func (p *recordingPointer) MoveTo(x, y int32) error         { p.x, p.y, p.moved = x, y, true; return nil }
+func (p *recordingPointer) Close()                          {}
+
+func TestReturnKeepsHeightAndRecentersBeforeRelease(t *testing.T) {
+	c, grabbed := newFakeIsolated(t, 1)
+	c.screen = ScreenInfo{Width: 2560, Height: 1440}
+	c.edgeSide, c.remoteH, c.remoteY = "left", 1080, 270
+	c.applyIsolation()
+	pointer := &recordingPointer{}
+	c.pointer = pointer
+	c.setGrabFn = func(_ *os.File, grab bool) error {
+		if !grab && !pointer.moved {
+			t.Fatal("released input before moving inside")
+		}
+		return nil
+	}
+	c.SetActive(true)
+	if pointer.x != entryClearance || pointer.y != 360 || grabbed() != 0 || c.canSwitch {
+		t.Fatalf("incorrect return: position=%d,%d grabbed=%d canSwitch=%v", pointer.x, pointer.y, grabbed(), c.canSwitch)
 	}
 }

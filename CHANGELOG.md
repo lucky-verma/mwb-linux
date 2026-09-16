@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Reduce cursor entry offsets to 50px local and 8% remote, align the
+  initial Windows landing with subsequent motion, and preserve the tracked
+  crossing height. Recenter before releasing input; keep inward-motion gates.
+- Recognize split-interface mouse movement nodes for input isolation.
+- Restore local input when a grabbed absolute pointer emits unsupported motion.
+  This is a recovery path, not touchpad forwarding support.
+- Format IPv6 peer addresses correctly for control and file connections.
+- Reject elevated `update --restart` with instructions for restarting from the
+  desktop user's session.
+- Align Debian source build dependencies with the current Go module and make
+  the packaged service receive-only by default.
+
 ## [0.6.2] - 2026-08-03
 
 ### Added
