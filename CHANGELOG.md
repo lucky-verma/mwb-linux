@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-15
+
+### Compatibility
+- Support PowerToys 0.101 and newer stream encryption. For PowerToys 0.100.2
+  or older, set `legacy_crypto = true` in `config.toml` before upgrading.
+  Existing security keys remain valid.
+
 ### Fixed
 - Reduce cursor entry offsets to 50px local and 8% remote, align the
   initial Windows landing with subsequent motion, and preserve the tracked
@@ -16,8 +23,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Format IPv6 peer addresses correctly for control and file connections.
 - Reject elevated `update --restart` with instructions for restarting from the
   desktop user's session.
-- Align Debian source build dependencies with the current Go module and make
-  the packaged service receive-only by default.
 
 ## [0.6.2] - 2026-08-03
 
@@ -408,7 +413,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.1...v0.6.0

@@ -62,6 +62,10 @@ No extra software needed on Windows beyond PowerToys, which bundles Mouse Withou
 
 ## Installation
 
+**PowerToys compatibility:** v0.6.3 defaults to PowerToys 0.101 or newer.
+If Windows runs PowerToys 0.100.2 or older, add `legacy_crypto = true` to
+`~/.config/mwb/config.toml` before upgrading. Keep your existing security key.
+
 ### One-Line Install (Ubuntu/Debian)
 
 ```bash
