@@ -4,7 +4,10 @@ package clipboard
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +59,37 @@ func TestHandleFileChannelStagesUntilPaste(t *testing.T) {
 	}
 	if !bytes.Equal(got, body) {
 		t.Fatalf("staged body = %q, want %q", got, body)
+	}
+}
+
+func TestHandleFileChannelLargeImageUsesWaylandClipboard(t *testing.T) {
+	imageData := image.NewNRGBA(image.Rect(0, 0, 1024, 512))
+	if _, err := rand.Read(imageData.Pix); err != nil {
+		t.Fatal(err)
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, imageData); err != nil {
+		t.Fatal(err)
+	}
+	if encoded.Len() <= maxInlineSize {
+		t.Fatalf("test image is %d bytes, want more than the inline limit", encoded.Len())
+	}
+
+	commands := &fakeClipboardCommands{}
+	m := &Manager{
+		backend:   testWaylandBackend(commands, "Hyprland"),
+		stageRoot: filepath.Join(t.TempDir(), "clipboard"),
+	}
+	res, err := m.HandleFileChannel(bytes.NewReader(fileChannelPayload(t, "image", encoded.Bytes())), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != "" || len(commands.inputs) != 1 {
+		t.Fatalf("image result path=%q, Wayland writes=%d; want one in-memory clipboard write", res.Path, len(commands.inputs))
+	}
+	call := commands.inputs[0]
+	if call.name != "wl-copy" || len(call.args) != 2 || call.args[0] != "--type" || call.args[1] != "image/png" || !bytes.Equal(call.data, encoded.Bytes()) {
+		t.Fatalf("unexpected Wayland image write: command=%q args=%v bytes=%d", call.name, call.args, len(call.data))
 	}
 }
 

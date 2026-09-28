@@ -235,20 +235,20 @@ func main() {
 			var clipMgr *clipboard.Manager
 			if clipboardEnabled {
 				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay())
+				// Outgoing large images use the clipboard port even when file-copy support is disabled.
+				sender := network.FileSender{
+					Addr:        fmt.Sprintf("%s:%d", cfg.Host, cfg.ClipboardPort()),
+					SecurityKey: cfg.Key,
+					MachineName: cfg.Name,
+					MachineID:   conn.MachineID,
+					MaxSize:     cfg.MaxFileSize,
+					DialTimeout: fileDialTimeout,
+				}
+				clipMgr.OnLargeImageCopy = sender.SendImage
 				if cfg.FileTransferEnabled() {
 					// A copied file is what the clipboard poll notices, but the
 					// bytes travel over their own connection rather than the
 					// clipboard packet stream.
-					sender := network.FileSender{
-						// The clipboard port, not addr: that one is the
-						// control channel and MWB answers it with a Handshake.
-						Addr:        fmt.Sprintf("%s:%d", cfg.Host, cfg.ClipboardPort()),
-						SecurityKey: cfg.Key,
-						MachineName: cfg.Name,
-						MachineID:   conn.MachineID,
-						MaxSize:     cfg.MaxFileSize,
-						DialTimeout: fileDialTimeout,
-					}
 					clipMgr.OnFileCopy = func(paths []string) {
 						if err := sender.Send(paths); err != nil {
 							slog.Error("outbound file copy failed", "err", err)

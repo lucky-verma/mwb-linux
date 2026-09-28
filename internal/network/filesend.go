@@ -82,3 +82,18 @@ func (fs FileSender) Send(paths []string) error {
 	w := &idleWriter{conn: conn.raw, w: conn.enc, timeout: fileWriteIdleTimeout}
 	return filetransfer.Send(w, path, fs.MaxSize)
 }
+
+// SendImage pushes a large clipboard image through MWB's clipboard port. The
+// "image" header makes PowerToys publish it as an image rather than a file.
+func (fs FileSender) SendImage(data []byte) error {
+	if int64(len(data)) > filetransfer.DefaultMaxSize {
+		return fmt.Errorf("%w: image is %d bytes, limit is %d", filetransfer.ErrSizeRejected, len(data), filetransfer.DefaultMaxSize)
+	}
+	conn, err := DialFile(fs.Addr, fs.SecurityKey, fs.MachineName, fs.MachineID, fs.DialTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.raw.Close() }()
+	w := &idleWriter{conn: conn.raw, w: conn.enc, timeout: fileWriteIdleTimeout}
+	return filetransfer.SendBytes(w, "image", data, filetransfer.DefaultMaxSize)
+}

@@ -2,8 +2,11 @@ package network
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net"
 	"os"
@@ -108,6 +111,60 @@ func TestFileSender_SendsSingleFile(t *testing.T) {
 	}
 	if filepath.Base(landed) != "sent-from-linux.bin" {
 		t.Errorf("landed as %q, want sent-from-linux.bin", filepath.Base(landed))
+	}
+}
+
+func TestFileSender_SendsLargeClipboardImage(t *testing.T) {
+	port := freePort(t)
+	dir := t.TempDir()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	result := make(chan *filetransfer.Result, 1)
+	errCh := make(chan error, 1)
+	onFile := func(c *Conn, push bool) {
+		if !push {
+			errCh <- fmt.Errorf("clipboard image was not pushed")
+			return
+		}
+		res, err := filetransfer.Receive(c.Reader(), dir, filetransfer.DefaultMaxSize)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		result <- res
+	}
+	if err := ListenFileChannel(port, testKey, "listener", "127.0.0.1", staticMachineID(77), onFile, stop); err != nil {
+		t.Fatal(err)
+	}
+
+	imageData := image.NewNRGBA(image.Rect(0, 0, 1024, 512))
+	if _, err := rand.Read(imageData.Pix); err != nil {
+		t.Fatal(err)
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, imageData); err != nil {
+		t.Fatal(err)
+	}
+	data := encoded.Bytes()
+	if len(data) <= 1<<20 {
+		t.Fatalf("test image is %d bytes, want more than the inline limit", len(data))
+	}
+	sender := FileSender{
+		Addr: fmt.Sprintf("127.0.0.1:%d", port), SecurityKey: testKey,
+		MachineName: "sender", MachineID: 42, DialTimeout: 5 * time.Second,
+	}
+	if err := sender.SendImage(data); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-result:
+		if res.Name != "image" || res.Path != "" || !bytes.Equal(res.Inline, data) {
+			t.Fatalf("received name=%q path=%q bytes=%d; want in-memory image of %d bytes", res.Name, res.Path, len(res.Inline), len(data))
+		}
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("clipboard image was not received")
 	}
 }
 

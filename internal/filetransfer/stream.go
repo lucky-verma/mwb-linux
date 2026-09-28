@@ -1,6 +1,7 @@
 package filetransfer
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -160,8 +161,10 @@ func Send(w io.Writer, path string, maxSize int64) error {
 	}
 	defer f.Close() //nolint:errcheck
 
-	if _, err := w.Write(hdr); err != nil {
+	if n, err := w.Write(hdr); err != nil {
 		return fmt.Errorf("send header: %w", err)
+	} else if n != len(hdr) {
+		return fmt.Errorf("send header: %w", io.ErrShortWrite)
 	}
 
 	// Bound the copy by the size already announced. A file growing mid-transfer
@@ -175,6 +178,30 @@ func Send(w io.Writer, path string, maxSize int64) error {
 	}
 
 	slog.Info("sent file", "path", path, "bytes", sent)
+	return nil
+}
+
+// SendBytes sends oversized clipboard content over the file channel without
+// staging the image or text as a visible file.
+func SendBytes(w io.Writer, name string, data []byte, maxSize int64) error {
+	if maxSize <= 0 {
+		maxSize = DefaultMaxSize
+	}
+	if int64(len(data)) > maxSize {
+		return fmt.Errorf("%w: clipboard payload is %d bytes, limit is %d", ErrSizeRejected, len(data), maxSize)
+	}
+	hdr, err := EncodeHeader(Header{Size: int64(len(data)), Name: name})
+	if err != nil {
+		return err
+	}
+	if n, err := w.Write(hdr); err != nil {
+		return fmt.Errorf("send header: %w", err)
+	} else if n != len(hdr) {
+		return fmt.Errorf("send header: %w", io.ErrShortWrite)
+	}
+	if _, err := writeAligned(w, bytes.NewReader(data), int64(len(data))); err != nil {
+		return fmt.Errorf("send body: %w", err)
+	}
 	return nil
 }
 

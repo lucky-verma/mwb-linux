@@ -8,6 +8,7 @@ package clipboard
 import (
 	"bytes"
 	"compress/flate"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -49,6 +50,8 @@ type Manager struct {
 	// File bytes do not travel over the clipboard packet stream, so the actual
 	// transfer belongs to the file channel; nil disables file sending.
 	OnFileCopy func(paths []string)
+	// OnLargeImageCopy sends images too large for the control packet stream.
+	OnLargeImageCopy func([]byte) error
 
 	conn        *network.Conn
 	backend     clipboardBackend
@@ -198,7 +201,7 @@ func (m *Manager) seedLocalClipboardHash() {
 	}
 	if hash == "" {
 		if imgData := m.getLocalImageClipboard(); imgData != nil {
-			hash = fmt.Sprintf("img:%d", len(imgData))
+			hash = imageHash(imgData)
 		}
 	}
 	if hash == "" {
@@ -261,7 +264,7 @@ func (m *Manager) pollClipboard() {
 			// Check for image clipboard first
 			imgData := m.getLocalImageClipboard()
 			if imgData != nil {
-				hash := fmt.Sprintf("img:%d", len(imgData))
+				hash := imageHash(imgData)
 				m.mu.Lock()
 				changed := hash != m.lastHash
 				if changed {
@@ -517,7 +520,7 @@ func (m *Manager) handleImageClipboard(data []byte) {
 	m.justSet = time.Now()
 	// Also update lastHash so pollClipboard doesn't re-send after the 3s suppress
 	// window expires — without this, the same image echoes back to Windows.
-	m.lastHash = fmt.Sprintf("img:%d", len(data))
+	m.lastHash = imageHash(data)
 	m.mu.Unlock()
 	slog.Info("clipboard image received from remote", "size", len(data), "mime", mimeType)
 }
@@ -554,7 +557,15 @@ func (m *Manager) getLocalImageClipboard() []byte {
 // sendImage sends image data to the remote via ClipboardImage packets.
 func (m *Manager) sendImage(data []byte) {
 	if len(data) > maxInlineSize {
-		slog.Warn("image too large for inline send", "size", len(data))
+		if m.OnLargeImageCopy == nil {
+			slog.Warn("image too large for inline send", "size", len(data))
+			return
+		}
+		if err := m.OnLargeImageCopy(data); err != nil {
+			slog.Error("send large clipboard image failed", "size", len(data), "err", err)
+			return
+		}
+		slog.Info("large image clipboard sent to remote", "size", len(data))
 		return
 	}
 
@@ -592,6 +603,10 @@ func (m *Manager) sendImage(data []byte) {
 	}
 
 	slog.Info("image clipboard sent to remote", "chunks", (len(data)+dataSize-1)/dataSize)
+}
+
+func imageHash(data []byte) string {
+	return fmt.Sprintf("img:%x", sha256.Sum256(data))
 }
 
 // encodeUTF16LE encodes a Go string to UTF-16LE bytes.

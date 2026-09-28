@@ -189,3 +189,20 @@ func TestHandleChunk_TracksImageStreams(t *testing.T) {
 		t.Error("image stream not tagged; the payload would be treated as text")
 	}
 }
+
+func TestLargeImagesUseFileChannelAndSameSizeChangesAreDistinct(t *testing.T) {
+	first := bytes.Repeat([]byte("a"), maxInlineSize+1)
+	second := bytes.Repeat([]byte("b"), len(first))
+	if imageHash(first) == imageHash(second) {
+		t.Fatal("different screenshots with the same byte length were treated as identical")
+	}
+	var sent []byte
+	m := &Manager{OnLargeImageCopy: func(data []byte) error {
+		sent = data
+		return nil
+	}}
+	m.sendImage(first)
+	if !bytes.Equal(sent, first) {
+		t.Fatal("large image did not use the clipboard file channel")
+	}
+}
