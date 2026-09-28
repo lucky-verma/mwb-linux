@@ -21,6 +21,9 @@ import (
 // reconnect loop for as long as TCP takes to give up, which is minutes.
 const fileWriteIdleTimeout = 60 * time.Second
 
+// PowerToys' clipboard helper refuses source images above 50 MiB.
+const maxClipboardImageSize = 50 * 1024 * 1024
+
 // idleWriter refreshes the write deadline ahead of every write, so it is
 // progress rather than total elapsed time that keeps a transfer alive.
 type idleWriter struct {
@@ -86,8 +89,8 @@ func (fs FileSender) Send(paths []string) error {
 // SendImage pushes a large clipboard image through MWB's clipboard port. The
 // "image" header makes PowerToys publish it as an image rather than a file.
 func (fs FileSender) SendImage(data []byte) error {
-	if int64(len(data)) > filetransfer.DefaultMaxSize {
-		return fmt.Errorf("%w: image is %d bytes, limit is %d", filetransfer.ErrSizeRejected, len(data), filetransfer.DefaultMaxSize)
+	if len(data) > maxClipboardImageSize {
+		return fmt.Errorf("%w: image is %d bytes, limit is %d", filetransfer.ErrSizeRejected, len(data), maxClipboardImageSize)
 	}
 	conn, err := DialFile(fs.Addr, fs.SecurityKey, fs.MachineName, fs.MachineID, fs.DialTimeout)
 	if err != nil {
@@ -95,5 +98,5 @@ func (fs FileSender) SendImage(data []byte) error {
 	}
 	defer func() { _ = conn.raw.Close() }()
 	w := &idleWriter{conn: conn.raw, w: conn.enc, timeout: fileWriteIdleTimeout}
-	return filetransfer.SendBytes(w, "image", data, filetransfer.DefaultMaxSize)
+	return filetransfer.SendBytes(w, "image", data, maxClipboardImageSize)
 }

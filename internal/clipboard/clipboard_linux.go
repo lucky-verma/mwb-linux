@@ -37,8 +37,8 @@ const (
 	// maxDecompressedSize caps the inflated size of an inbound clipboard payload.
 	// maxRecvBuf only bounds the *compressed* bytes; DEFLATE can expand ~1000:1,
 	// so without an output cap a few MB of crafted data can inflate to gigabytes
-	// and exhaust memory (decompression bomb). 64 MiB accommodates large,
-	// high-resolution clipboard images while bounding worst-case allocation.
+	// and exhaust memory (decompression bomb). 64 MiB accommodates large text
+	// while bounding worst-case allocation.
 	maxDecompressedSize = 64 * 1048576
 )
 
@@ -309,6 +309,10 @@ func (m *Manager) pollClipboard() {
 
 // sendClipboard sends the current clipboard to the remote.
 func (m *Manager) sendClipboard() {
+	if image := m.getLocalImageClipboard(); image != nil {
+		m.sendImage(image)
+		return
+	}
 	text := m.getLocalClipboard()
 	if text != "" {
 		m.sendText(text)
@@ -425,20 +429,9 @@ func (m *Manager) HandleFileChannelPayload(name string, data []byte) {
 }
 
 func (m *Manager) handleRemoteData(data []byte, isImage bool) {
-
 	if isImage {
-		// Try decompress first, fall back to raw data
-		decompressed, err := deflateDecompress(data)
-		if err != nil {
-			if errors.Is(err, errDecompressedTooLarge) {
-				slog.Warn("rejected oversized image clipboard", "err", err, "dataLen", len(data))
-				return
-			}
-			slog.Info("image clipboard not deflate-compressed, using raw data", "dataLen", len(data))
-			m.handleImageClipboard(data)
-		} else {
-			m.handleImageClipboard(decompressed)
-		}
+		// PowerToys sends image bytes as-is; only text is Deflate compressed.
+		m.handleImageClipboard(data)
 		return
 	}
 
@@ -498,7 +491,7 @@ func (m *Manager) handleImageClipboard(data []byte) {
 		} else if data[0] == 'B' && data[1] == 'M' {
 			mimeType = "image/bmp"
 		} else {
-			// Might be raw DIB (no BM header) — add BMP header
+			// Some peers send a raw DIB; try exposing it as BMP.
 			slog.Info("image data doesn't have known header, trying as raw DIB",
 				"first4", fmt.Sprintf("%02x %02x %02x %02x", data[0], data[1], data[2], data[3]))
 			mimeType = "image/bmp"

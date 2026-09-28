@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,11 +198,21 @@ func TestLargeImagesUseFileChannelAndSameSizeChangesAreDistinct(t *testing.T) {
 		t.Fatal("different screenshots with the same byte length were treated as identical")
 	}
 	var sent []byte
-	m := &Manager{OnLargeImageCopy: func(data []byte) error {
+	commands := &fakeClipboardCommands{outputFunc: func(_ string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "--list-types":
+			return []byte("image/png\n"), nil
+		case "--type image/png":
+			return first, nil
+		default:
+			return nil, fmt.Errorf("unexpected wl-paste arguments: %v", args)
+		}
+	}}
+	m := &Manager{backend: testWaylandBackend(commands, "Hyprland"), OnLargeImageCopy: func(data []byte) error {
 		sent = data
 		return nil
 	}}
-	m.sendImage(first)
+	m.sendClipboard()
 	if !bytes.Equal(sent, first) {
 		t.Fatal("large image did not use the clipboard file channel")
 	}

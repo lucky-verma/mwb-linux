@@ -24,8 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   capture.
 
 ### Fixed
-- Send clipboard images larger than 1 MB over the clipboard channel and detect
-  distinct screenshots with the same byte length.
+- Send clipboard images larger than 1 MB over the clipboard channel, process
+  incoming images as raw bytes, and detect distinct screenshots of equal size.
 
 ## [0.6.3] - 2026-09-15
 
