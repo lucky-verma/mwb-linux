@@ -63,7 +63,7 @@ func testBit(bits []byte, n uint) bool {
 
 // hasRelativePointerAxes identifies the motion node of a mouse or trackball.
 // Some USB receivers expose movement and buttons on different evdev nodes, so
-// requiring BTN_MOUSE on the movement node drops real pointer motion.
+// requiring BTN_MOUSE on the movement node leaves its motion unisolated.
 func hasRelativePointerAxes(relBits []byte) bool {
 	return testBit(relBits, relX) && testBit(relBits, relY)
 }

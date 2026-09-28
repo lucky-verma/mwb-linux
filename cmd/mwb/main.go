@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -204,7 +206,7 @@ func main() {
 	go func() {
 		for {
 			// Race: try outbound connect AND accept inbound — first one wins
-			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.MessagePort())
+			addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.MessagePort()))
 			slog.Info("connecting", "addr", addr)
 
 			connectStop := make(chan struct{})
@@ -237,7 +239,7 @@ func main() {
 				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay())
 				// Outgoing large images use the clipboard port even when file-copy support is disabled.
 				sender := network.FileSender{
-					Addr:        fmt.Sprintf("%s:%d", cfg.Host, cfg.ClipboardPort()),
+					Addr:        net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.ClipboardPort())),
 					SecurityKey: cfg.Key,
 					MachineName: cfg.Name,
 					MachineID:   conn.MachineID,
@@ -290,30 +292,9 @@ func main() {
 				}
 				handler.ShouldActivate = cap.AcceptsActivation
 
-				// When we receive MachineSwitched, mark ourselves as active and
-				// move cursor away from edge — without this the cursor stays at
-				// x=0 and re-triggers the edge switch immediately on any movement.
-				handler.OnActivated = func() {
-					cap.SetActive(true)
-					go func() {
-						entryX, entryY := cap.SafeEntryPosition()
-						if err := cap.Reenter(entryX, entryY); err != nil {
-							slog.Warn("place local cursor after activation", "err", err)
-						}
-					}()
-				}
-
-				// When server sends NextMachine (cursor bounced off server's edge),
-				// reclaim control and move cursor away from our edge
-				handler.OnReclaimed = func() {
-					cap.SetActive(true)
-					go func() {
-						entryX, entryY := cap.SafeEntryPosition()
-						if err := cap.Reenter(entryX, entryY); err != nil {
-							slog.Warn("place local cursor after reclaim", "err", err)
-						}
-					}()
-				}
+				// Recenter at the configured edge before releasing input.
+				handler.OnActivated = func() { cap.SetActive(true) }
+				handler.OnReclaimed = func() { cap.SetActive(true) }
 
 				if err := cap.Run(); err != nil {
 					slog.Error("capture start failed", "err", err)

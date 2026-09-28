@@ -249,3 +249,21 @@ func TestRestartUnit_UsesUserService(t *testing.T) {
 		t.Fatalf("systemctl args = %q", got)
 	}
 }
+
+func TestValidateRestart(t *testing.T) {
+	for _, tc := range []struct {
+		restart  bool
+		uid      int
+		rejected bool
+	}{
+		{true, 0, true}, {false, 0, false}, {true, 1000, false}, {false, 1000, false},
+	} {
+		err := validateRestart(tc.restart, tc.uid)
+		if (err != nil) != tc.rejected {
+			t.Fatalf("restart=%v uid=%d: %v", tc.restart, tc.uid, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "without sudo") {
+			t.Fatal(err)
+		}
+	}
+}

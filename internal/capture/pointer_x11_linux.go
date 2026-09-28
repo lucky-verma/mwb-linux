@@ -11,6 +11,7 @@ import (
 
 type pointerPositioner interface {
 	Position() (x, y int32, err error)
+	MoveTo(x, y int32) error
 	Close()
 }
 
@@ -40,6 +41,10 @@ func (p *x11Pointer) Position() (int32, int32, error) {
 		return -1, -1, err
 	}
 	return int32(reply.RootX), int32(reply.RootY), nil
+}
+
+func (p *x11Pointer) MoveTo(x, y int32) error {
+	return xproto.WarpPointerChecked(p.conn, 0, p.root, 0, 0, 0, 0, int16(x), int16(y)).Check()
 }
 
 func (p *x11Pointer) Close() {
