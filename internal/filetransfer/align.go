@@ -48,8 +48,10 @@ func writeAligned(w io.Writer, r io.Reader, size int64) (int64, error) {
 		for i := want; i < out; i++ {
 			buf[i] = 0
 		}
-		if _, err := w.Write(buf[:out]); err != nil {
+		if n, err := w.Write(buf[:out]); err != nil {
 			return sent, err
+		} else if int64(n) != out {
+			return sent, io.ErrShortWrite
 		}
 		sent += want
 	}

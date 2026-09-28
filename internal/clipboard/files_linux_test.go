@@ -48,4 +48,7 @@ func TestClipboardFileTargetPrefersGNOME(t *testing.T) {
 	if got := clipboardFileTarget("TARGETS\ntext/uri-list\n"); got != uriListTarget {
 		t.Fatalf("fallback target = %q, want %q", got, uriListTarget)
 	}
+	if got := clipboardFileTarget("application/not-text/uri-list-extra\n"); got != "" {
+		t.Fatalf("partial target match = %q, want empty", got)
+	}
 }

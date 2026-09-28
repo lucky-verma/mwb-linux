@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,5 +188,32 @@ func TestHandleChunk_TracksImageStreams(t *testing.T) {
 	m.mu.Unlock()
 	if !isImage {
 		t.Error("image stream not tagged; the payload would be treated as text")
+	}
+}
+
+func TestLargeImagesUseFileChannelAndSameSizeChangesAreDistinct(t *testing.T) {
+	first := bytes.Repeat([]byte("a"), maxInlineSize+1)
+	second := bytes.Repeat([]byte("b"), len(first))
+	if imageHash(first) == imageHash(second) {
+		t.Fatal("different screenshots with the same byte length were treated as identical")
+	}
+	var sent []byte
+	commands := &fakeClipboardCommands{outputFunc: func(_ string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "--list-types":
+			return []byte("image/png\n"), nil
+		case "--type image/png":
+			return first, nil
+		default:
+			return nil, fmt.Errorf("unexpected wl-paste arguments: %v", args)
+		}
+	}}
+	m := &Manager{backend: testWaylandBackend(commands, "Hyprland"), OnLargeImageCopy: func(data []byte) error {
+		sent = data
+		return nil
+	}}
+	m.sendClipboard()
+	if !bytes.Equal(sent, first) {
+		t.Fatal("large image did not use the clipboard file channel")
 	}
 }

@@ -1,9 +1,12 @@
-.PHONY: build install uninstall clean test fmt lint check bump
+.PHONY: build build-wayland install uninstall clean test test-wayland fmt lint check bump
 
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 
 build:
 	go build -o mwb ./cmd/mwb
+
+build-wayland:
+	CGO_ENABLED=1 go build -tags wayland_portal -o mwb ./cmd/mwb
 
 install: build
 	install -D mwb $(HOME)/go/bin/mwb
@@ -29,8 +32,11 @@ clean:
 test:
 	go test ./...
 
+test-wayland:
+	CGO_ENABLED=1 go test -race -tags wayland_portal ./...
+
 fmt:
-	gofmt -w .
+	go fmt ./...
 
 lint:
 	golangci-lint run
@@ -52,4 +58,3 @@ bump: ## generate a new version with svu
 		echo "Tagged version $$version"; \
 		echo "Pushing tag $$version to origin..."; \
 		git push origin $$version
-

@@ -3,14 +3,11 @@
 package clipboard
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -117,28 +114,16 @@ func removeStage(path string) {
 }
 
 // setLocalFileClipboard makes Linux file managers see the staged file as a
-// copied file. xclip remains the X11 selection owner after its parent exits;
-// native Wayland desktops receive the same selection through XWayland.
+// copied file through the selected native Wayland or X11 backend.
 func (m *Manager) setLocalFileClipboard(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	target := preferredFileClipboardTarget(os.Getenv("XDG_CURRENT_DESKTOP"))
-	payload := fileClipboardPayload(abs, target)
-
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", target, "-i")
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	cmd.Stdin = bytes.NewBufferString(payload)
-	// Do not use Output/CombinedOutput here. xclip forks a selection-owner
-	// process which keeps inherited output pipes open; waiting for pipe EOF
-	// would turn a successful clipboard set into a timeout.
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("xclip: %w", err)
+	if m.backend == nil {
+		return fmt.Errorf("no local clipboard backend")
 	}
-	return nil
+	return m.backend.writeFile(abs)
 }
 
 func preferredFileClipboardTarget(desktop string) string {

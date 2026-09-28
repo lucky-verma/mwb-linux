@@ -52,6 +52,7 @@ nfpms:
     dependencies:
       - xdotool
       - xclip
+      - wl-clipboard
       - x11-xserver-utils
     contents:
       - src: ./packaging/mwb.service
