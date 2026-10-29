@@ -114,13 +114,43 @@ func ioctlPtr(fd *os.File, request uintptr, ptr unsafe.Pointer) error {
 	return nil
 }
 
-func writeEvent(fd *os.File, typ, code uint16, value int32) error {
-	ev := inputEvent{Type: typ, Code: code, Value: value}
-	return binary.Write(fd, binary.LittleEndian, &ev)
+// inputEventSize is sizeof(struct input_event) on 64-bit Linux.
+const inputEventSize = 24
+
+// emit writes events followed by SYN_REPORT in one write(2), so a pointer
+// move costs one system call instead of three and the kernel sees the whole
+// report at once. The kernel stamps the time, so it is left zero.
+func emit(fd *os.File, events ...[3]int32) error {
+	var buf [4 * inputEventSize]byte
+	if len(events) > len(buf)/inputEventSize-1 {
+		return fmt.Errorf("too many events in one report: %d", len(events))
+	}
+	n := encodeEvents(buf[:], events)
+	_, err := fd.Write(buf[:n])
+	return err
 }
 
-func syncEvents(fd *os.File) error {
-	return writeEvent(fd, evSyn, 0, 0)
+// encodeEvents lays out events and a closing SYN_REPORT as struct
+// input_event and returns the bytes used. buf must have room for them.
+func encodeEvents(buf []byte, events [][3]int32) int {
+	n := 0
+	put := func(typ, code, value int32) {
+		b := buf[n : n+inputEventSize]
+		clear(b[:16]) // time: stamped by the kernel
+		binary.LittleEndian.PutUint16(b[16:], uint16(typ))
+		binary.LittleEndian.PutUint16(b[18:], uint16(code))
+		binary.LittleEndian.PutUint32(b[20:], uint32(value))
+		n += inputEventSize
+	}
+	for _, e := range events {
+		put(e[0], e[1], e[2])
+	}
+	put(int32(evSyn), 0, 0)
+	return n
+}
+
+func ev(typ, code uint16, value int32) [3]int32 {
+	return [3]int32{int32(typ), int32(code), value}
 }
 
 // VirtualMouse is a uinput device with absolute positioning, buttons, and wheel.
@@ -132,7 +162,7 @@ type VirtualMouse struct {
 func CreateVirtualMouse(name string) (*VirtualMouse, error) {
 	fd, err := os.OpenFile("/dev/uinput", os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open /dev/uinput: %w\nSetup required:\n  1. sudo modprobe uinput\n  2. echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf\n  3. echo 'KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\"' | sudo tee /etc/udev/rules.d/99-uinput.rules\n  4. sudo udevadm control --reload-rules && sudo udevadm trigger /dev/uinput\n  5. Ensure your user is in the 'input' group: sudo usermod -aG input $USER", err)
+		return nil, fmt.Errorf("open /dev/uinput: %w", err)
 	}
 
 	ok := false
@@ -214,44 +244,26 @@ func setupMouseLegacy(fd *os.File, name string) error {
 
 // MoveTo moves the virtual mouse cursor to absolute position (x, y) in range 0-65535.
 func (m *VirtualMouse) MoveTo(x, y int32) error {
-	if err := writeEvent(m.fd, evAbs, absX, x); err != nil {
-		return err
-	}
-	if err := writeEvent(m.fd, evAbs, absY, y); err != nil {
-		return err
-	}
-	return syncEvents(m.fd)
+	return emit(m.fd, ev(evAbs, absX, x), ev(evAbs, absY, y))
 }
 
 // ButtonDown presses a mouse button (BTN_LEFT, BTN_RIGHT, or BTN_MIDDLE).
 func (m *VirtualMouse) ButtonDown(button uint16) error {
-	if err := writeEvent(m.fd, evKey, button, 1); err != nil {
-		return err
-	}
-	return syncEvents(m.fd)
+	return emit(m.fd, ev(evKey, button, 1))
 }
 
 // ButtonUp releases a mouse button (BTN_LEFT, BTN_RIGHT, or BTN_MIDDLE).
 func (m *VirtualMouse) ButtonUp(button uint16) error {
-	if err := writeEvent(m.fd, evKey, button, 0); err != nil {
-		return err
-	}
-	return syncEvents(m.fd)
+	return emit(m.fd, ev(evKey, button, 0))
 }
 
 // Wheel scrolls the mouse wheel by delta units (positive = up, negative = down).
 func (m *VirtualMouse) Wheel(delta int32) error {
-	if err := writeEvent(m.fd, evRel, relWheel, delta); err != nil {
-		return err
-	}
-	return syncEvents(m.fd)
+	return emit(m.fd, ev(evRel, relWheel, delta))
 }
 
 func (m *VirtualMouse) HWheel(delta int32) error {
-	if err := writeEvent(m.fd, evRel, relHWheel, delta); err != nil {
-		return err
-	}
-	return syncEvents(m.fd)
+	return emit(m.fd, ev(evRel, relHWheel, delta))
 }
 
 // Close destroys the virtual device and closes the file descriptor.
@@ -269,7 +281,7 @@ type VirtualKeyboard struct {
 func CreateVirtualKeyboard(name string) (*VirtualKeyboard, error) {
 	fd, err := os.OpenFile("/dev/uinput", os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open /dev/uinput: %w\nSetup required:\n  1. sudo modprobe uinput\n  2. echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf\n  3. echo 'KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\"' | sudo tee /etc/udev/rules.d/99-uinput.rules\n  4. sudo udevadm control --reload-rules && sudo udevadm trigger /dev/uinput\n  5. Ensure your user is in the 'input' group: sudo usermod -aG input $USER", err)
+		return nil, fmt.Errorf("open /dev/uinput: %w", err)
 	}
 
 	ok := false
@@ -311,18 +323,12 @@ func CreateVirtualKeyboard(name string) (*VirtualKeyboard, error) {
 
 // KeyDown presses a key identified by its evdev keycode.
 func (k *VirtualKeyboard) KeyDown(code uint16) error {
-	if err := writeEvent(k.fd, evKey, code, 1); err != nil {
-		return err
-	}
-	return syncEvents(k.fd)
+	return emit(k.fd, ev(evKey, code, 1))
 }
 
 // KeyUp releases a key identified by its evdev keycode.
 func (k *VirtualKeyboard) KeyUp(code uint16) error {
-	if err := writeEvent(k.fd, evKey, code, 0); err != nil {
-		return err
-	}
-	return syncEvents(k.fd)
+	return emit(k.fd, ev(evKey, code, 0))
 }
 
 // Close destroys the virtual device and closes the file descriptor.

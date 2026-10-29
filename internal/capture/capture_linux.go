@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lucky-verma/mwb-linux/internal/group"
 	"github.com/lucky-verma/mwb-linux/internal/input"
 	"github.com/lucky-verma/mwb-linux/internal/network"
 	"github.com/lucky-verma/mwb-linux/internal/protocol"
@@ -25,9 +26,15 @@ const (
 	evKey = 0x01
 	evRel = 0x02
 
-	relX     = 0x00
-	relY     = 0x01
-	relWheel = 0x08
+	relX      = 0x00
+	relY      = 0x01
+	relHWheel = 0x06
+	relWheel  = 0x08
+
+	// Mice report their back/forward buttons as BTN_SIDE/BTN_EXTRA, or as
+	// BTN_BACK/BTN_FORWARD.
+	btnForward = 0x115
+	btnBack    = 0x116
 
 	inputEventSize = 24
 
@@ -77,6 +84,8 @@ type Capturer struct {
 	setGrabFn     func(*os.File, bool) error // test seam; nil uses the real ioctl
 	findDevicesFn func() ([]string, error)   // test seam; nil scans /dev/input
 	pointer       pointerPositioner          // one persistent X11 connection for edge polling
+	edge          edgeSource                 // Wayland: edge window that reports touches; nil polls pointer
+	inward        int32                      // Wayland: raw inward motion since the edge was disarmed
 	stopCh        chan struct{}
 	wg            sync.WaitGroup            // tracks all goroutines for clean Stop()
 	devices       map[string]*trackedDevice // open /dev/input/event* fds, keyed by path
@@ -89,21 +98,73 @@ type Capturer struct {
 	remoteW       int32                     // detected remote screen width
 	remoteH       int32                     // detected remote screen height
 	accelMult     float64                   // scaling applied to raw evdev deltas (config: accel_multiplier)
-	edgeY         int32                     // Y position where cursor left local screen
-	canSwitch     bool                      // true once cursor has been away from edge since activation
-	canReturn     bool                      // true once cursor has moved away from the remote return edge
-	hotkeyCtrl    bool                      // tracks Ctrl key state for hotkey detection
-	hotkeyAlt     bool                      // tracks Alt key state for hotkey detection
+	accel         pointerAccel              // speed-dependent gain on top of accelMult
+	// Motion of the mouse report being read, sent as one move when the
+	// report ends (SYN_REPORT) rather than one per axis.
+	pendDX, pendDY int32
+	out            *outbox // nil until Run: sends then happen inline (tests)
+	canSwitch      bool    // true once cursor has been away from edge since activation
+	canReturn      bool    // true once cursor has moved away from the remote return edge
+	hotkeyCtrl     bool    // tracks Ctrl key state for hotkey detection
+	hotkeyAlt      bool    // tracks Alt key state for hotkey detection
 	// OnActivated runs whenever this capturer transitions from remote control
 	// back to local ownership, including its own virtual-edge return path.
 	OnActivated func()
+
+	// linuxPeer enables the cursor-ownership packets an mwb-linux peer needs:
+	// MachineSwitched when the cursor crosses to it and HideMouse when this
+	// machine takes it back. PowerToys works this out itself, so they are only
+	// sent for a Linux peer. Set before Run and not changed afterwards.
+	linuxPeer bool
+	sendFn    func(*protocol.Packet) error // test seam; nil uses conn.SendPacket
+
+	// Group mode (nav != nil): this machine is one screen in a row. The
+	// cursor can leave through either edge that has a neighbour and walk
+	// across several remote screens; at names the screen it is on while
+	// remote, and edgeSide is the direction it last travelled. Set before Run.
+	nav        Navigator
+	at         string
+	watchLeft  bool
+	watchRight bool
+	watchUp    bool
+	watchDown  bool
+	edges      map[string]edgeSource // Wayland: one edge window per watched side
+}
+
+// Navigator places this machine in a group's row of screens; *group.Group
+// implements it.
+type Navigator interface {
+	// Beyond returns the machine past side of the machine named from ("" =
+	// this one); self reports that it is this machine.
+	Beyond(from, side string) (t group.Target, self, ok bool)
+	// Moved announces that this machine's input moved the cursor to the
+	// machine named to ("" = this one), entering from side at the along-edge
+	// position y.
+	Moved(to, side string, y int32)
+	// NeighborEdges reports every side of this screen that borders another
+	// machine: "left", "right", "up", "down".
+	NeighborEdges() map[string]bool
+}
+
+// SetNavigator puts the capturer in group mode. Call before Run.
+func (c *Capturer) SetNavigator(n Navigator) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nav = n
+	c.linuxPeer = false // group members learn where the cursor is from n
+	if n != nil {
+		e := n.NeighborEdges()
+		c.watchLeft, c.watchRight = e["left"], e["right"]
+		c.watchUp, c.watchDown = e["up"], e["down"]
+	}
 }
 
 // trackedDevice is one open /dev/input/event* node.
 type trackedDevice struct {
-	file    *os.File
-	grab    bool // keyboard or pointer: suppress it while the cursor is remote
-	grabbed bool // whether the exclusive grab is currently held
+	file     *os.File
+	grab     bool // keyboard or pointer: suppress it while the cursor is remote
+	grabbed  bool // whether the exclusive grab is currently held
+	touchpad *touchpad
 }
 
 // New creates a new input capturer.
@@ -137,6 +198,7 @@ func (c *Capturer) SetActive(active bool) {
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
 		c.canSwitch = false // must move away from local edge before next outbound switch
+		c.inward = 0
 		c.canReturn = false // must move away from remote edge before next return switch
 	}
 	c.mu.Unlock()
@@ -163,21 +225,32 @@ func (c *Capturer) IsActive() bool {
 func (c *Capturer) SafeEntryPosition() (x, y int32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	y = c.screen.Height / 2
+	// The coordinate parallel to the shared edge follows where the cursor was
+	// on the remote screen; the one across it sits an inset in from the edge.
+	mapY := c.screen.Height / 2
 	if c.remoteH > 0 {
-		y = max(0, min(c.screen.Height-1, int32(int64(c.remoteY)*int64(c.screen.Height)/int64(c.remoteH))))
+		mapY = max(0, min(c.screen.Height-1, int32(int64(c.remoteY)*int64(c.screen.Height)/int64(c.remoteH))))
 	}
-	inset := entryInset(c.screen.Width)
+	mapX := c.screen.Width / 2
+	if c.remoteW > 0 {
+		mapX = max(0, min(c.screen.Width-1, int32(int64(c.remoteX)*int64(c.screen.Width)/int64(c.remoteW))))
+	}
 	switch c.edgeSide {
 	case "left":
-		x = inset
+		return entryInset(c.screen.Width), mapY
 	case "right":
-		x = c.screen.Width - inset
+		return c.screen.Width - entryInset(c.screen.Width), mapY
+	case "up":
+		return mapX, entryInset(c.screen.Height)
+	case "down":
+		return mapX, c.screen.Height - entryInset(c.screen.Height)
 	default:
-		x = c.screen.Width / 2
+		return c.screen.Width / 2, mapY
 	}
-	return x, y
 }
+
+// clampWire keeps an along-edge coordinate within MWB's 0-65535 space.
+func clampWire(v int32) int32 { return max(0, min(65535, v)) }
 
 // recenter runs before releasing grabbed input on every local return path.
 func (c *Capturer) recenter() {
@@ -199,14 +272,33 @@ func remoteEntryInset(width int32) int32 {
 	return max(1, int32((int64(width)*remoteEntryFraction+32767)/65535))
 }
 
-// remoteEntryLocked keeps the initial wire landing and virtual cursor aligned.
-func (c *Capturer) remoteEntryLocked() (pixel, wire int32) {
-	pixel = remoteEntryInset(c.remoteW)
-	if c.edgeSide == "left" {
-		pixel = c.remoteW - pixel
+// remoteEntryLocked places the virtual cursor after a crossing in direction
+// c.edgeSide, with alongWire (0-65535) its position along the edge it came
+// through. It sets c.remoteX and c.remoteY in pixels and returns the entry
+// position as wire coordinates (xWire, yWire) for the absolute burst.
+func (c *Capturer) remoteEntryLocked(alongWire int32) (xWire, yWire int32) {
+	switch c.edgeSide {
+	case "up", "down":
+		// Crossing a top/bottom edge: land an inset in across it, the along
+		// coordinate runs horizontally.
+		inset := remoteEntryInset(c.remoteH)
+		py := inset // moved down: land near the top
+		if c.edgeSide == "up" {
+			py = c.remoteH - inset
+		}
+		c.remoteY = py
+		c.remoteX = int32(int64(alongWire) * int64(c.remoteW) / 65535)
+		return int32(int64(c.remoteX) * 65535 / int64(max(1, c.remoteW))), int32(int64(py) * 65535 / int64(max(1, c.remoteH)))
+	default: // "left", "right"
+		inset := remoteEntryInset(c.remoteW)
+		px := inset // moved right: land near the left
+		if c.edgeSide == "left" {
+			px = c.remoteW - inset
+		}
+		c.remoteX = px
+		c.remoteY = int32(int64(alongWire) * int64(c.remoteH) / 65535)
+		return int32(int64(px) * 65535 / int64(max(1, c.remoteW))), alongWire
 	}
-	wire = int32(int64(pixel) * 65535 / int64(c.remoteW))
-	return
 }
 
 // AcceptsReclaim reports whether a remote NextMachine request is returning
@@ -287,6 +379,93 @@ func (c *Capturer) SetAccelMultiplier(m float64) {
 	slog.Info("cursor acceleration multiplier set", "accel_multiplier", m)
 }
 
+// SetLinuxPeer marks the peer as another mwb-linux instance. Call before Run.
+func (c *Capturer) SetLinuxPeer(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.linuxPeer = on
+}
+
+// notifyPeer sends a cursor-ownership packet to a Linux peer. It is a no-op for
+// a PowerToys peer, so that path sends exactly what it always has. The caller
+// must not hold c.mu.
+func (c *Capturer) notifyPeer(t protocol.PackageType) {
+	c.mu.Lock()
+	linux, conn, send := c.linuxPeer, c.conn, c.sendFn
+	c.mu.Unlock()
+	if !linux {
+		return
+	}
+	pkt := &protocol.Packet{Type: t}
+	if send == nil {
+		if conn == nil {
+			return
+		}
+		pkt.Src, pkt.Des = conn.MachineID, conn.RemoteID
+		send = conn.SendPacket
+	}
+	if err := send(pkt); err != nil {
+		slog.Debug("send cursor ownership packet failed", "type", t, "err", err)
+	}
+}
+
+// reclaimLocal returns the cursor to this machine because of something done
+// here (hotkey, absolute pointer), and tells a Linux peer it no longer has it.
+func (c *Capturer) reclaimLocal() {
+	wasActive := c.IsActive()
+	c.SetActive(true)
+	if !wasActive {
+		c.notifyPeer(protocol.HideMouse)
+		c.mu.Lock()
+		nav := c.nav
+		c.mu.Unlock()
+		if nav != nil {
+			nav.Moved("", "", 32767)
+		}
+	}
+}
+
+// YieldToPeer handles a Linux peer's HideMouse: the peer took the cursor back
+// while it was on this machine. Local input is isolated and forwarded, as it is
+// after crossing the edge locally, so either machine's keyboard and mouse
+// follow the single shared cursor. The virtual remote cursor starts at the
+// same landing point a local crossing uses.
+func (c *Capturer) YieldToPeer() {
+	c.mu.Lock()
+	if !c.active || c.stopped {
+		c.mu.Unlock()
+		return
+	}
+	pointer := c.pointer
+	c.mu.Unlock()
+
+	// Query outside the lock: it is a round trip to the X server.
+	y := int32(-1)
+	if pointer != nil {
+		if _, py, err := pointer.Position(); err == nil {
+			y = py
+		}
+	}
+
+	c.mu.Lock()
+	if !c.active || c.stopped {
+		c.mu.Unlock()
+		return
+	}
+	if y < 0 || y >= c.screen.Height {
+		y = c.screen.Height / 2
+	}
+	slog.Info("peer took the cursor back; forwarding local input to it")
+	c.active = false
+	c.switchSent = time.Now()
+	c.remoteEntryLocked(clampWire(int32(int64(y) * 65535 / int64(max(1, c.screen.Height)))))
+	c.canReturn = false
+	c.mu.Unlock()
+
+	// applyIsolation acquires c.mu itself.
+	c.applyIsolation()
+}
+
 // Stop signals the capturer to stop and waits for all goroutines to exit.
 //
 // Closing the device descriptors is what restores local input: the kernel drops
@@ -309,6 +488,12 @@ func (c *Capturer) Stop() {
 	if c.pointer != nil {
 		c.pointer.Close()
 	}
+	if c.edge != nil {
+		c.edge.Close()
+	}
+	for _, e := range c.edges {
+		e.Close()
+	}
 	c.wg.Wait()
 }
 
@@ -329,38 +514,91 @@ func (c *Capturer) Run() error {
 			return fmt.Errorf("connect to X11 for cursor position: %w", err)
 		}
 	}
+	if c.nav != nil && c.edges == nil && isWaylandSession() {
+		c.edges = map[string]edgeSource{}
+		for side, watch := range map[string]bool{"left": c.watchLeft, "right": c.watchRight, "up": c.watchUp, "down": c.watchDown} {
+			if !watch {
+				continue
+			}
+			strip, err := newEdgeStrip(getDisplay(), side)
+			if err != nil {
+				slog.Warn("Wayland session: could not create the edge window; the cursor may not cross there", "edge", side, "err", err)
+				continue
+			}
+			c.edges[side] = strip
+		}
+		// Arm only after the mouse moves inward, as below.
+		c.mu.Lock()
+		c.canSwitch = false
+		c.inward = 0
+		c.mu.Unlock()
+		slog.Info("Wayland session: detecting the screen edges with XWayland edge windows",
+			"left", c.watchLeft, "right", c.watchRight, "up", c.watchUp, "down", c.watchDown)
+	} else if c.nav == nil && c.edge == nil && isWaylandSession() {
+		strip, err := newEdgeStrip(getDisplay(), c.edgeSide)
+		if err != nil {
+			slog.Warn("Wayland session: could not create the edge window; the cursor may not cross to the remote", "err", err)
+		} else {
+			// The strip reports a touch as soon as it maps if the cursor is
+			// already on the edge, as it is after a reconnect while the
+			// cursor was remote. Arm only after the mouse moves inward.
+			c.mu.Lock()
+			c.canSwitch = false
+			c.inward = 0
+			c.mu.Unlock()
+			c.edge = strip
+			slog.Info("Wayland session: detecting the screen edge with an XWayland edge window", "edge", c.edgeSide)
+		}
+	}
 	slog.Info("found input devices", "count", len(devices))
 
-	c.wg.Add(1)
+	out := newOutbox()
+	c.mu.Lock()
+	c.out = out
+	c.mu.Unlock()
+	c.wg.Add(3)
+	go func() {
+		defer c.wg.Done()
+		out.run(c.stopCh)
+	}()
 	go func() {
 		defer c.wg.Done()
 		c.pollCursorEdge()
+	}()
+	go func() {
+		defer c.wg.Done()
+		c.watchDevices()
 	}()
 	for _, d := range devices {
 		c.addDevice(d)
 	}
 	c.mu.Lock()
-	targets := 0
+	targets, touchpads := 0, 0
 	for _, d := range c.devices {
 		if d.grab {
 			targets++
 		}
+		if d.touchpad != nil {
+			touchpads++
+		}
 	}
 	c.mu.Unlock()
-	slog.Info("classified input devices", "tracked", len(devices), "keyboards_and_pointers", targets)
+	slog.Info("classified input devices", "tracked", len(devices), "keyboards_and_pointers", targets, "touchpads", touchpads)
 	return nil
 }
 
 // addDevice opens, classifies and starts monitoring one device node. Devices
 // that cannot be opened are skipped: /dev/input entries appear before udev has
 // applied permissions, and a node can vanish between listing and opening.
-func (c *Capturer) addDevice(path string) {
+//
+// It reports whether it added a keyboard, mouse or touchpad.
+func (c *Capturer) addDevice(path string) bool {
 	c.mu.Lock()
 	_, known := c.devices[path]
 	stopped := c.stopped
 	c.mu.Unlock()
 	if known || stopped {
-		return
+		return false
 	}
 
 	// O_NONBLOCK is what makes Stop() able to finish. Opened blocking, the fd is
@@ -371,9 +609,18 @@ func (c *Capturer) addDevice(path string) {
 	// poller, where Close() evicts pending reads, with no added input latency.
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return
+		return false
 	}
 	grabbable := isGrabTarget(f)
+	var tp *touchpad
+	if grabbable {
+		tp = touchpadFor(f)
+	}
+	if tp != nil {
+		c.mu.Lock()
+		tp.scale = c.accelMult / defaultAccelMultiplier
+		c.mu.Unlock()
+	}
 
 	c.mu.Lock()
 	// Re-check under the lock: Stop() may have run, and a concurrent refresh
@@ -381,17 +628,17 @@ func (c *Capturer) addDevice(path string) {
 	if c.stopped {
 		c.mu.Unlock()
 		_ = f.Close()
-		return
+		return false
 	}
 	if _, dup := c.devices[path]; dup {
 		c.mu.Unlock()
 		_ = f.Close()
-		return
+		return false
 	}
 	if c.devices == nil {
 		c.devices = make(map[string]*trackedDevice)
 	}
-	c.devices[path] = &trackedDevice{file: f, grab: grabbable}
+	c.devices[path] = &trackedDevice{file: f, grab: grabbable, touchpad: tp}
 	// wg.Add must happen under the same lock that guards c.stopped, otherwise
 	// it can race an in-progress wg.Wait() in Stop().
 	c.wg.Add(1)
@@ -401,6 +648,7 @@ func (c *Capturer) addDevice(path string) {
 		defer c.wg.Done()
 		c.monitorDevice(f)
 	}()
+	return grabbable
 }
 
 // refreshDevices brings the tracked set in line with what is actually present
@@ -446,28 +694,144 @@ func (c *Capturer) refreshDevices() {
 		_ = f.Close()
 	}
 	for _, p := range paths {
-		c.addDevice(p)
+		if c.addDevice(p) {
+			slog.Info("input device connected", "device", p)
+		}
+	}
+}
+
+// deviceRescan is how often /dev/input is checked for keyboards and mice
+// that connected since the last look.
+const deviceRescan = 2 * time.Second
+
+// watchDevices picks up devices that appear while mwb runs, such as a
+// Bluetooth mouse reconnecting after the screen sleeps, and grabs them at
+// once if the cursor is on another machine. Without it, a device that
+// appeared while the cursor was here would be read only from the next
+// switch, and on Wayland, where re-arming an edge relies on reading the
+// mouse, that mouse alone could not cross.
+func (c *Capturer) watchDevices() {
+	t := time.NewTicker(deviceRescan)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-t.C:
+			if c.IsActive() {
+				c.grabMu.Lock()
+				c.refreshDevices()
+				c.grabMu.Unlock()
+			} else {
+				c.applyIsolation() // rescans, and grabs what is new
+			}
+		}
 	}
 }
 
 // pollCursorEdge checks the actual cursor position and triggers switches.
+// On Wayland the polled position is frozen, so edge touches come from the
+// edge window instead and re-arming comes from evdev motion (trackInward).
 func (c *Capturer) pollCursorEdge() {
-	slog.Info("edge polling started", "edge", c.edgeSide, "screenWidth", c.screen.Width)
+	slog.Info("edge polling started", "edge", c.edgeSide, "screenWidth", c.screen.Width,
+		"group", c.nav != nil, "left", c.watchLeft, "right", c.watchRight)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Edge windows report touches on Wayland: one for the pair's edge, or
+	// one per watched side in a group.
+	var hitsLeft, hitsRight, hitsUp, hitsDown <-chan int32
+	if c.edge != nil {
+		if c.edgeSide == "right" {
+			hitsRight = c.edge.Hits()
+		} else {
+			hitsLeft = c.edge.Hits()
+		}
+	}
+	if e := c.edges["left"]; e != nil {
+		hitsLeft = e.Hits()
+	}
+	if e := c.edges["right"]; e != nil {
+		hitsRight = e.Hits()
+	}
+	if e := c.edges["up"]; e != nil {
+		hitsUp = e.Hits()
+	}
+	if e := c.edges["down"]; e != nil {
+		hitsDown = e.Hits()
+	}
+	windows := c.edge != nil || len(c.edges) > 0
+
+	// hit fires when an edge window reports a touch. along is the coordinate
+	// the window reports along itself: Y for a left/right edge, X for up/down.
+	hit := func(side string, along int32) {
+		c.mu.Lock()
+		armed := c.active && c.canSwitch
+		c.mu.Unlock()
+		if !armed {
+			return
+		}
+		var x, y int32
+		switch side {
+		case "left":
+			x, y = 0, along
+		case "right":
+			x, y = c.screen.Width-1, along
+		case "up":
+			x, y = along, 0
+		case "down":
+			x, y = along, c.screen.Height-1
+		}
+		c.crossLocalEdge(side, x, y)
+	}
+
+	ticks := 0
 	errCount := 0
 	for {
 		select {
 		case <-c.stopCh:
 			return
+		case y, ok := <-hitsLeft:
+			if !ok {
+				hitsLeft = nil
+				continue
+			}
+			hit("left", y)
+		case y, ok := <-hitsRight:
+			if !ok {
+				hitsRight = nil
+				continue
+			}
+			hit("right", y)
+		case x, ok := <-hitsUp:
+			if !ok {
+				hitsUp = nil
+				continue
+			}
+			hit("up", x)
+		case x, ok := <-hitsDown:
+			if !ok {
+				hitsDown = nil
+				continue
+			}
+			hit("down", x)
 		case <-ticker.C:
+			if windows {
+				// Re-raise about once a second so newly mapped windows
+				// cannot cover the strips.
+				if ticks++; ticks%100 == 0 {
+					if c.edge != nil {
+						c.edge.Raise()
+					}
+					for _, e := range c.edges {
+						e.Raise()
+					}
+				}
+				continue
+			}
 			if !c.IsActive() {
 				continue
 			}
-			c.mu.Lock()
-			// canSwitch gate handles loop prevention — no time-based cooldown needed
-			c.mu.Unlock()
 			x, y, err := c.pointer.Position()
 			if err != nil {
 				errCount++
@@ -479,83 +843,151 @@ func (c *Capturer) pollCursorEdge() {
 			if errCount > 0 {
 				errCount = 0
 			}
-
-			// Track whether cursor has been away from the edge since activation
-			// This prevents loops: cursor must move inward first, then back to edge
-			c.mu.Lock()
-			edgeZone := int32(rearmDistance) // pixels from edge — must move this far inward to re-arm
-			switch c.edgeSide {
-			case "left":
-				if x > edgeZone {
-					c.canSwitch = true
-				}
-			case "right":
-				if x < c.screen.Width-edgeZone {
-					c.canSwitch = true
-				}
-			}
-			canSwitch := c.canSwitch
-			c.mu.Unlock()
-
-			switched := false
-			if canSwitch {
-				switch c.edgeSide {
-				case "left":
-					if x <= 1 {
-						switched = true
-					}
-				case "right":
-					if x >= c.screen.Width-1 {
-						switched = true
-					}
-				}
-			}
-
-			if switched {
-				now := time.Now()
-				if now.Sub(c.lastSwitch) < 100*time.Millisecond {
-					continue
-				}
-				c.lastSwitch = now
-
-				slog.Info("screen edge hit, switching to remote", "edge", c.edgeSide, "x", x, "y", y)
-
-				// Map local Y to remote entry point (proportional)
-				entryY := int32(float64(y) / float64(c.screen.Height) * 65535)
-
-				c.mu.Lock()
-				c.active = false
-				c.switchSent = time.Now()
-				c.edgeY = y
-				// Use the same pixel position for the initial burst and motion.
-				pixelX, entryX := c.remoteEntryLocked()
-				c.remoteX = pixelX
-				c.remoteY = int32(float64(y) / float64(c.screen.Height) * float64(c.remoteH))
-				c.canReturn = false // must move away from return edge first
-				c.mu.Unlock()
-
-				// Suppress local input (synchronous — one ioctl per device)
-				c.applyIsolation()
-
-				// Send mouse burst to the entry position on remote
-				// Multiple packets help Windows MWB register the switch reliably
-				conn := c.conn
-				go func() {
-					for i := 0; i < 5; i++ {
-						mouse := &protocol.Packet{
-							Type: protocol.Mouse,
-							Src:  conn.MachineID,
-							Des:  conn.RemoteID,
-						}
-						mouse.Mouse.X = entryX
-						mouse.Mouse.Y = entryY
-						mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
-						_ = conn.SendPacket(mouse)
-						time.Sleep(5 * time.Millisecond)
-					}
-				}()
+			if side := c.polledEdge(x, y); side != "" {
+				c.crossLocalEdge(side, x, y)
 			}
 		}
+	}
+}
+
+// polledEdge tracks whether the cursor has been away from the edge since
+// activation (so it cannot loop straight back), and returns the side it is
+// touching once armed, or "".
+func (c *Capturer) polledEdge(x, y int32) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	edgeZone := int32(rearmDistance) // pixels from edge — must move this far inward to re-arm
+	left, right := c.edgeSide == "left", c.edgeSide == "right"
+	up, down := false, false
+	if c.nav != nil {
+		left, right, up, down = c.watchLeft, c.watchRight, c.watchUp, c.watchDown
+		// Re-arm once the cursor sits clear of every watched edge.
+		awayX := x > edgeZone && x < c.screen.Width-edgeZone
+		awayY := y > edgeZone && y < c.screen.Height-edgeZone
+		if awayX && awayY {
+			c.canSwitch = true
+		}
+	} else {
+		if left && x > edgeZone {
+			c.canSwitch = true
+		}
+		if right && x < c.screen.Width-edgeZone {
+			c.canSwitch = true
+		}
+	}
+	if !c.canSwitch {
+		return ""
+	}
+	if left && x <= 1 {
+		return "left"
+	}
+	if right && x >= c.screen.Width-1 {
+		return "right"
+	}
+	if up && y <= 1 {
+		return "up"
+	}
+	if down && y >= c.screen.Height-1 {
+		return "down"
+	}
+	return ""
+}
+
+// crossLocalEdge hands the cursor on after it touched side of this screen.
+func (c *Capturer) crossLocalEdge(side string, x, y int32) {
+	if c.nav != nil {
+		c.switchToGroup(side, x, y)
+		return
+	}
+	c.switchToRemote(x, y)
+}
+
+// trackInward re-arms the edge on Wayland once the physical pointer has moved
+// rearmDistance raw units away from the edge since the last disarm.
+func (c *Capturer) trackInward(dx, dy int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if (c.edge == nil && len(c.edges) == 0) || c.canSwitch {
+		return // edge windows are only used on Wayland; X11 polling re-arms itself
+	}
+	// Count motion away from the edge the cursor last entered through: inward is
+	// along X for a left/right edge, along Y for an up/down one.
+	var inward int32
+	switch c.edgeSide {
+	case "right":
+		inward = -dx
+	case "left":
+		inward = dx
+	case "down":
+		inward = -dy
+	case "up":
+		inward = dy
+	default:
+		inward = abs32(dx) + abs32(dy) // no known edge yet: any motion moves away
+	}
+	c.inward = max(0, c.inward+inward)
+	if c.inward >= rearmDistance {
+		c.canSwitch = true
+		c.inward = 0
+	}
+}
+
+// switchToRemote hands the cursor to the remote after it hit the local edge at (x, y).
+func (c *Capturer) switchToRemote(x, y int32) {
+	now := time.Now()
+	if now.Sub(c.lastSwitch) < 100*time.Millisecond {
+		return
+	}
+	c.lastSwitch = now
+
+	slog.Info("screen edge hit, switching to remote", "edge", c.edgeSide, "x", x, "y", y)
+
+	c.mu.Lock()
+	c.active = false
+	c.switchSent = time.Now()
+	// A pair always shares a left/right edge; the along-edge coordinate is the
+	// height. remoteEntryLocked sets the virtual cursor and returns the burst
+	// landing.
+	entryX, entryY := c.remoteEntryLocked(clampWire(int32(int64(y) * 65535 / int64(max(1, c.screen.Height)))))
+	c.canReturn = false // must move away from return edge first
+	c.mu.Unlock()
+
+	// Suppress local input (synchronous — one ioctl per device)
+	c.applyIsolation()
+
+	// Send mouse burst to the entry position on remote
+	// Multiple packets help Windows MWB register the switch reliably
+	c.mu.Lock()
+	conn, send := c.conn, c.sendFn
+	c.mu.Unlock()
+	go func() {
+		// A Linux peer cannot tell injected motion from its own,
+		// so tell it the cursor now lives there. Sent ahead of the
+		// burst so the peer's recenter cannot land after it.
+		c.notifyPeer(protocol.MachineSwitched)
+		sendEntryBurst(conn, send, entryX, entryY)
+	}()
+}
+
+// sendEntryBurst moves the remote cursor to its landing point. Multiple
+// packets help Windows MWB register the switch reliably.
+func sendEntryBurst(conn *network.Conn, send func(*protocol.Packet) error, entryX, entryY int32) {
+	if send == nil {
+		if conn == nil {
+			return
+		}
+		send = conn.SendPacket
+	}
+	for i := 0; i < 5; i++ {
+		mouse := &protocol.Packet{Type: protocol.Mouse}
+		if conn != nil {
+			mouse.Src, mouse.Des = conn.MachineID, conn.RemoteID
+		}
+		mouse.Mouse.X = entryX
+		mouse.Mouse.Y = entryY
+		mouse.Mouse.DwFlags = protocol.WM_MOUSEMOVE
+		_ = send(mouse)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -771,9 +1203,25 @@ func findInputDevices() ([]string, error) {
 }
 
 func (c *Capturer) monitorDevice(f *os.File) {
-	defer f.Close() //nolint:errcheck
+	defer func() {
+		// The device is gone (or mwb is stopping). Forget it, so that when
+		// it comes back, often under the same /dev/input path, the rescan
+		// opens it again instead of keeping this closed file.
+		c.mu.Lock()
+		if d := c.devices[f.Name()]; d != nil && d.file == f {
+			delete(c.devices, f.Name())
+		}
+		c.mu.Unlock()
+		_ = f.Close()
+	}()
 	slog.Debug("monitoring device", "path", f.Name())
 	buf := make([]byte, inputEventSize*32)
+	c.mu.Lock()
+	var tp *touchpad
+	if d := c.devices[f.Name()]; d != nil {
+		tp = d.touchpad
+	}
+	c.mu.Unlock()
 	for {
 		select {
 		case <-c.stopCh:
@@ -788,6 +1236,10 @@ func (c *Capturer) monitorDevice(f *os.File) {
 
 		for off := 0; off+inputEventSize <= n; off += inputEventSize {
 			ev := parseEvent(buf[off : off+inputEventSize])
+			if tp != nil {
+				tp.handle(ev, touchpadSink{c})
+				continue
+			}
 			if ev.Type == uint16(evAbsType) {
 				c.mu.Lock()
 				d := c.devices[f.Name()]
@@ -814,6 +1266,11 @@ func parseEvent(buf []byte) inputEvent {
 
 func (c *Capturer) handleEvent(ev inputEvent) {
 	if c.IsActive() {
+		if ev.Type == evRel && ev.Code == relX {
+			c.trackInward(ev.Value, 0)
+		} else if ev.Type == evRel && ev.Code == relY {
+			c.trackInward(0, ev.Value)
+		}
 		return
 	}
 	// Suppress during switch grace period
@@ -825,11 +1282,17 @@ func (c *Capturer) handleEvent(ev inputEvent) {
 	}
 
 	switch ev.Type {
+	case evSyn:
+		if ev.Code == synReport {
+			c.mu.Lock()
+			c.flushMotionLocked()
+			c.mu.Unlock()
+		}
 	case uint16(evAbsType):
 		// Raw absolute movement cannot be forwarded. Return local control
 		// explicitly without altering the normal mouse-switching paths.
 		slog.Warn("absolute pointer forwarding is unsupported; restoring local input")
-		c.SetActive(true)
+		c.reclaimLocal()
 	case evRel:
 		c.handleRel(ev)
 	case evKey:
@@ -856,42 +1319,101 @@ func (c *Capturer) handleRel(ev inputEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	t := ev.Sec*1_000_000 + ev.Usec
 	switch ev.Code {
 	case relX:
-		c.remoteX += applyAcceleration(ev.Value, c.accelMult)
-		if c.remoteX < 0 {
-			c.remoteX = 0
-		}
-		if c.remoteX > c.remoteW {
-			c.remoteX = c.remoteW
-		}
+		gain := c.accelMult * c.accel.factorFor(t, ev.Value, 0)
+		c.pendDX += applyAcceleration(ev.Value, gain)
 	case relY:
-		c.remoteY += applyAcceleration(ev.Value, c.accelMult)
-		if c.remoteY < 0 {
-			c.remoteY = 0
-		}
-		if c.remoteY > c.remoteH {
-			c.remoteY = c.remoteH
-		}
+		gain := c.accelMult * c.accel.factorFor(t, 0, ev.Value)
+		c.pendDY += applyAcceleration(ev.Value, gain)
 	case relWheel:
+		c.flushMotionLocked()
 		c.sendMouseLocked(0, 0, ev.Value*120, protocol.WM_MOUSEWHEEL)
-		return
-	default:
+	case relHWheel:
+		// Both positive to the right.
+		c.flushMotionLocked()
+		c.sendMouseLocked(0, 0, ev.Value*120, protocol.WM_MOUSEHWHEEL)
+	}
+}
+
+// flushMotionLocked moves the remote cursor by the motion gathered from the
+// current mouse report, as one move. c.mu must be held.
+func (c *Capturer) flushMotionLocked() {
+	dx, dy := c.pendDX, c.pendDY
+	if dx == 0 && dy == 0 {
 		return
 	}
+	c.pendDX, c.pendDY = 0, 0
+	if c.active {
+		return // the cursor came back meanwhile
+	}
+	c.moveRemoteLocked(dx, dy)
+}
+
+// returnLocalLocked brings the cursor back to this machine after the virtual
+// cursor left the remote screen towards it, then runs announce. c.mu must be
+// held; it is released and re-acquired.
+func (c *Capturer) returnLocalLocked(announce func()) {
+	c.active = true
+	c.pendDX, c.pendDY = 0, 0
+	onActivated := c.OnActivated
+	c.switchSent = time.Time{}
+	c.lastActivated = time.Now()
+	c.canSwitch = false // block re-trigger until cursor moves away from edge
+	c.inward = 0
+	c.mu.Unlock()
+
+	// Move cursor away from edge SYNCHRONOUSLY before releasing the grab.
+	// Ordering is load-bearing: release first and in-flight physical mouse
+	// motion drives the cursor straight back into the edge, bouncing the
+	// switch. Move first, then hand input back.
+	c.recenter()
+
+	c.applyIsolation()
+	if onActivated != nil {
+		onActivated()
+	}
+	announce()
+	c.mu.Lock()
+}
+
+// moveRemoteLocked moves the virtual remote cursor by (dx, dy) pixels, returns
+// control when it reaches the return edge, and otherwise forwards the new
+// position. c.mu must be held; it is released and re-acquired on return.
+func (c *Capturer) moveRemoteLocked(dx, dy int32) {
+	c.remoteX = max(0, min(c.remoteW, c.remoteX+dx))
+	c.remoteY = max(0, min(c.remoteH, c.remoteY+dy))
 
 	// Like the local edge gate, require deliberate inward movement before return.
 	// This prevents jitter/momentum from the initial switch from bouncing back.
-	returnZone := remoteEntryInset(c.remoteW)
+	// The gate is on the axis the cursor crossed: horizontal for a left/right
+	// entry, vertical for an up/down one.
 	switch c.edgeSide {
 	case "left":
-		if c.remoteX < c.remoteW-returnZone {
+		if c.remoteX < c.remoteW-remoteEntryInset(c.remoteW) {
 			c.canReturn = true
 		}
 	case "right":
-		if c.remoteX > returnZone {
+		if c.remoteX > remoteEntryInset(c.remoteW) {
 			c.canReturn = true
 		}
+	case "up":
+		if c.remoteY < c.remoteH-remoteEntryInset(c.remoteH) {
+			c.canReturn = true
+		}
+	case "down":
+		if c.remoteY > remoteEntryInset(c.remoteH) {
+			c.canReturn = true
+		}
+	}
+
+	if c.nav != nil {
+		if c.canReturn && c.crossRemoteLocked() {
+			return
+		}
+		c.sendPositionLocked()
+		return
 	}
 
 	// Check if virtual cursor hit the return edge (opposite of edgeSide)
@@ -916,30 +1438,16 @@ func (c *Capturer) handleRel(ev inputEvent) {
 	}
 
 	if switchBack {
-		remY := c.remoteY
-		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
-		c.active = true
-		onActivated := c.OnActivated
-		c.switchSent = time.Time{}
-		c.lastActivated = time.Now()
-		c.canSwitch = false // block re-trigger until cursor moves away from edge
-		c.mu.Unlock()
-
-		// Move cursor away from edge SYNCHRONOUSLY before releasing the grab.
-		// Ordering is load-bearing: release first and in-flight physical mouse
-		// motion drives the cursor straight back into the edge, bouncing the
-		// switch. Move first, then hand input back.
-		c.recenter()
-
-		c.applyIsolation()
-		if onActivated != nil {
-			onActivated()
-		}
-		c.mu.Lock()
+		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", c.remoteY)
+		c.returnLocalLocked(func() { c.notifyPeer(protocol.HideMouse) })
 		return
 	}
 
-	// Send absolute mouse position to remote
+	c.sendPositionLocked()
+}
+
+// sendPositionLocked sends the virtual cursor's absolute position.
+func (c *Capturer) sendPositionLocked() {
 	absX := int32(float64(c.remoteX) / float64(c.remoteW) * 65535)
 	absY := int32(float64(c.remoteY) / float64(c.remoteH) * 65535)
 	c.sendMouseLocked(absX, absY, 0, protocol.WM_MOUSEMOVE)
@@ -958,51 +1466,26 @@ func (c *Capturer) handleKey(ev inputEvent) {
 	if ev.Code == 106 && ev.Value == 1 && c.hotkeyCtrl && c.hotkeyAlt {
 		if !c.IsActive() {
 			slog.Info("hotkey Ctrl+Alt+Right: returning to Ubuntu")
-			c.SetActive(true)
+			c.reclaimLocal()
 			return
 		}
 	}
 
 	// Mouse buttons
-	if ev.Code >= 0x110 && ev.Code <= 0x112 {
-		if !c.IsActive() {
-			var flags int32
-			switch ev.Code {
-			case input.BTN_LEFT:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_LBUTTONDOWN
-				case 0:
-					flags = protocol.WM_LBUTTONUP
-				default:
-					return
-				}
-			case input.BTN_RIGHT:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_RBUTTONDOWN
-				case 0:
-					flags = protocol.WM_RBUTTONUP
-				default:
-					return
-				}
-			case input.BTN_MIDDLE:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_MBUTTONDOWN
-				case 0:
-					flags = protocol.WM_MBUTTONUP
-				default:
-					return
-				}
+	if btn, ok := mouseButtons[ev.Code]; ok {
+		if !c.IsActive() && (ev.Value == 0 || ev.Value == 1) {
+			flags := btn.up
+			if ev.Value == 1 {
+				flags = btn.down
 			}
 			// Use current virtual cursor position so clicks register at the
 			// correct location on Windows, not always at top-left (0,0).
 			c.mu.Lock()
+			c.flushMotionLocked()
 			absX := int32(float64(c.remoteX) / float64(c.remoteW) * 65535)
 			absY := int32(float64(c.remoteY) / float64(c.remoteH) * 65535)
 			c.mu.Unlock()
-			c.sendMouse(absX, absY, 0, flags)
+			c.sendMouse(absX, absY, btn.data, flags)
 		}
 		return
 	}
@@ -1012,7 +1495,7 @@ func (c *Capturer) handleKey(ev inputEvent) {
 		return
 	}
 
-	vk, ok := input.KeyCodeToVK(ev.Code)
+	vk, extended, ok := input.KeyCodeToVKExtended(ev.Code)
 	if !ok {
 		return
 	}
@@ -1025,49 +1508,106 @@ func (c *Capturer) handleKey(ev inputEvent) {
 	if ev.Value == 0 {
 		dwFlags = protocol.LLKHF_UP
 	}
+	if extended {
+		dwFlags |= protocol.LLKHF_EXTENDED
+	}
 
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return
+	}
 	pkt := &protocol.Packet{
 		Type: protocol.Keyboard,
-		Src:  c.conn.MachineID,
-		Des:  c.conn.RemoteID,
+		Src:  conn.MachineID,
+		Des:  conn.RemoteID,
 	}
 	pkt.Keyboard.WVk = vk
 	pkt.Keyboard.DwFlags = dwFlags
+	c.post(pkt, conn, nil, false)
+}
 
-	if err := c.conn.SendPacket(pkt); err != nil {
-		slog.Debug("send keyboard failed", "err", err)
+// post sends pkt to conn (or through send), via the outbox once Run has
+// started it. move marks a pointer move, which a newer one may replace.
+func (c *Capturer) post(pkt *protocol.Packet, conn *network.Conn, send func(*protocol.Packet) error, move bool) {
+	c.mu.Lock()
+	out := c.out
+	c.mu.Unlock()
+	if out != nil {
+		out.put(pkt, conn, send, move)
+		return
+	}
+	if send == nil {
+		if conn == nil {
+			return
+		}
+		send = conn.SendPacket
+	}
+	if err := send(pkt); err != nil {
+		slog.Debug("send input failed", "type", pkt.Type, "err", err)
 	}
 }
 
-func (c *Capturer) sendMouse(x, y, wheelDelta, flags int32) {
-	pkt := &protocol.Packet{
-		Type: protocol.Mouse,
-		Src:  c.conn.MachineID,
-		Des:  c.conn.RemoteID,
-	}
-	pkt.Mouse.X = x
-	pkt.Mouse.Y = y
-	pkt.Mouse.WheelDelta = wheelDelta
-	pkt.Mouse.DwFlags = flags
+// mouseButton is how one evdev button travels: its down and up messages, and
+// the mouse data that goes with them (which X button, as MWB sends it).
+type mouseButton struct{ down, up, data int32 }
 
-	if err := c.conn.SendPacket(pkt); err != nil {
-		slog.Debug("send mouse failed", "err", err)
-	}
+var mouseButtons = map[uint16]mouseButton{
+	input.BTN_LEFT:   {protocol.WM_LBUTTONDOWN, protocol.WM_LBUTTONUP, 0},
+	input.BTN_RIGHT:  {protocol.WM_RBUTTONDOWN, protocol.WM_RBUTTONUP, 0},
+	input.BTN_MIDDLE: {protocol.WM_MBUTTONDOWN, protocol.WM_MBUTTONUP, 0},
+	input.BTN_SIDE:   {protocol.WM_XBUTTONDOWN, protocol.WM_XBUTTONUP, 1},
+	btnBack:          {protocol.WM_XBUTTONDOWN, protocol.WM_XBUTTONUP, 1},
+	input.BTN_EXTRA:  {protocol.WM_XBUTTONDOWN, protocol.WM_XBUTTONUP, 2},
+	btnForward:       {protocol.WM_XBUTTONDOWN, protocol.WM_XBUTTONUP, 2},
+}
+
+func (c *Capturer) sendMouse(x, y, wheelDelta, flags int32) {
+	c.mu.Lock()
+	conn, send, out := c.conn, c.sendFn, c.out
+	c.mu.Unlock()
+	queueMouse(out, conn, send, x, y, wheelDelta, flags)
 }
 
 // sendMouseLocked sends a mouse packet (caller must hold c.mu).
 func (c *Capturer) sendMouseLocked(x, y, wheelDelta, flags int32) {
-	pkt := &protocol.Packet{
-		Type: protocol.Mouse,
-		Src:  c.conn.MachineID,
-		Des:  c.conn.RemoteID,
+	queueMouse(c.out, c.conn, c.sendFn, x, y, wheelDelta, flags)
+}
+
+// queueMouse sends one mouse packet through out, or inline when out is nil.
+func queueMouse(out *outbox, conn *network.Conn, send func(*protocol.Packet) error, x, y, wheelDelta, flags int32) {
+	if out == nil {
+		deliverMouse(conn, send, x, y, wheelDelta, flags)
+		return
+	}
+	pkt := &protocol.Packet{Type: protocol.Mouse}
+	if conn != nil {
+		pkt.Src, pkt.Des = conn.MachineID, conn.RemoteID
+	}
+	pkt.Mouse.X, pkt.Mouse.Y = x, y
+	pkt.Mouse.WheelDelta, pkt.Mouse.DwFlags = wheelDelta, flags
+	out.put(pkt, conn, send, flags == protocol.WM_MOUSEMOVE)
+}
+
+// deliverMouse sends one mouse packet through send, or conn when send is nil.
+func deliverMouse(conn *network.Conn, send func(*protocol.Packet) error, x, y, wheelDelta, flags int32) {
+	pkt := &protocol.Packet{Type: protocol.Mouse}
+	if conn != nil {
+		pkt.Src, pkt.Des = conn.MachineID, conn.RemoteID
 	}
 	pkt.Mouse.X = x
 	pkt.Mouse.Y = y
 	pkt.Mouse.WheelDelta = wheelDelta
 	pkt.Mouse.DwFlags = flags
 
-	if err := c.conn.SendPacket(pkt); err != nil {
+	if send == nil {
+		if conn == nil {
+			return
+		}
+		send = conn.SendPacket
+	}
+	if err := send(pkt); err != nil {
 		slog.Debug("send mouse failed", "err", err)
 	}
 }

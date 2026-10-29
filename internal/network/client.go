@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,6 +35,17 @@ type Conn struct {
 	RemoteName string
 	nextID     atomic.Int32
 	sendMu     sync.Mutex // guards enc.Write — CBC mode is not goroutine-safe
+
+	// idleTimeout, when non-zero, makes ReceiveLoop give up on a connection
+	// that has delivered nothing for that long. Zero (the default, and always
+	// the case for a PowerToys peer) keeps reads unbounded as before.
+	idleTimeout time.Duration
+}
+
+// SetIdleTimeout bounds how long ReceiveLoop waits for the next packet. Call it
+// before ReceiveLoop starts; zero disables the bound.
+func (c *Conn) SetIdleTimeout(d time.Duration) {
+	c.idleTimeout = d
 }
 
 // Cached key material — PBKDF2 is expensive (50k iterations), only derive once.
@@ -228,7 +240,7 @@ func (c *Conn) finishControlSetup(machineName string, first *protocol.Packet) er
 
 // Connect establishes a TCP connection, performs IV exchange and handshake.
 func Connect(addr, securityKey, machineName string, timeout time.Duration) (*Conn, error) {
-	raw, err := net.DialTimeout("tcp", addr, timeout)
+	raw, err := dial(addr, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
@@ -379,6 +391,49 @@ func isLocalNetwork(ip net.IP) bool {
 	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
+// AcceptLocalNetwork, passed as allowedHost, lets any local-network source
+// attempt the handshake instead of one configured peer. It is used by a Linux
+// peer that waits for the other machine to connect, so it has no host to
+// match. That is the same set isAllowedPeer already lets attempt it beyond the
+// configured address (RFC1918/ULA and link-local, never loopback or
+// globally routable sources). The shared key still decides who passes.
+//
+// An empty allowedHost keeps its meaning: no inbound connections at all.
+const AcceptLocalNetwork = "*"
+
+// localNetworkSource is the AcceptLocalNetwork check. Tests replace it so two
+// peers on loopback count as a local network; production never does.
+var localNetworkSource = isLocalNetwork
+
+// peerFilter returns the inbound source check for allowedHost, plus the
+// resolved addresses for logging.
+func peerFilter(allowedHost string) (allow func(net.Addr) bool, allowedIPs []net.IP, err error) {
+	if allowedHost == AcceptLocalNetwork {
+		return func(addr net.Addr) bool {
+			ip := remoteIP(addr)
+			return ip != nil && localNetworkSource(ip)
+		}, nil, nil
+	}
+	allowedIPs, err = resolveAllowedPeer(allowedHost)
+	return func(addr net.Addr) bool { return isAllowedPeer(addr, allowedIPs) }, allowedIPs, err
+}
+
+// RemoteHost is the peer's address on this connection, in a form net.Dial
+// accepts (an IPv6 link-local address keeps its zone). A waiting Linux peer
+// learns where to send files from it, since it has no configured host.
+func (c *Conn) RemoteHost() string {
+	if tcp, ok := c.raw.RemoteAddr().(*net.TCPAddr); ok {
+		if tcp.Zone != "" {
+			return tcp.IP.String() + "%" + tcp.Zone
+		}
+		return tcp.IP.String()
+	}
+	if ip := remoteIP(c.raw.RemoteAddr()); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
 // InboundFile handles a peer-initiated file transfer. The connection is
 // identical to the control channel up to the IV exchange and distinguished only
 // by the first packet it sends. The stream is positioned at the file header
@@ -399,15 +454,21 @@ type InboundFile func(c *Conn, push bool)
 // allowedHost restricts inbound connections to the configured peer. Hostnames
 // are resolved once at listener startup; resolution failure disables inbound
 // connections while leaving the outbound retry path available.
-func ListenAndAccept(port int, securityKey, machineName, allowedHost string, onFile InboundFile, stop chan struct{}) (chan *Conn, error) {
+//
+// onKeyMismatch, when not nil, is called with the remote address whenever an
+// allowed source completes the secure-stream setup but its first packet fails
+// only on the magic number: that is a real peer using a different security
+// key, so the caller can tell the user instead of leaving it as a silent
+// "not connected". It may be nil.
+func ListenAndAccept(port int, securityKey, machineName, allowedHost string, onFile InboundFile, onKeyMismatch func(remote string), stop chan struct{}) (chan *Conn, error) {
 	connCh := make(chan *Conn, 1)
-	allowedIPs, resolveErr := resolveAllowedPeer(allowedHost)
+	allow, allowedIPs, resolveErr := peerFilter(allowedHost)
 	if resolveErr != nil {
 		slog.Warn("could not resolve configured inbound peer; inbound connections disabled",
 			"host", allowedHost, "err", resolveErr)
 	}
 
-	addr := fmt.Sprintf(":%d", port)
+	addr := listenAddr(port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", addr, err)
@@ -449,7 +510,7 @@ func ListenAndAccept(port int, securityKey, machineName, allowedHost string, onF
 			// Refuse globally routable sources before they can consume handshake
 			// work. The shared key remains the authentication control; this is
 			// defense in depth.
-			if !isAllowedPeer(raw.RemoteAddr(), allowedIPs) {
+			if !allow(raw.RemoteAddr()) {
 				slog.Warn("rejected inbound connection from unexpected source",
 					"remote", raw.RemoteAddr(), "allowedHost", allowedHost)
 				_ = raw.Close()
@@ -484,7 +545,17 @@ func ListenAndAccept(port int, securityKey, machineName, allowedHost string, onF
 				// first packet as its header and aborts on an unexpected type.
 				first, err := conn.RecvPacket()
 				if err != nil {
-					slog.Error("incoming first packet failed", "remote", raw.RemoteAddr(), "err", err)
+					if errors.Is(err, protocol.ErrMagicMismatch) {
+						// A real peer with a different security key, not noise:
+						// it was allowed by source and set up a secure stream.
+						slog.Warn("a computer tried to connect with a different security key; the keys must match on both machines",
+							"remote", raw.RemoteAddr())
+						if onKeyMismatch != nil {
+							onKeyMismatch(raw.RemoteAddr().String())
+						}
+					} else {
+						slog.Error("incoming first packet failed", "remote", raw.RemoteAddr(), "err", err)
+					}
 					_ = raw.Close()
 					return
 				}
@@ -744,7 +815,7 @@ func (c *Conn) Close() error {
 // The returned Conn is positioned for the caller to write the file header and
 // body; the caller owns closing it.
 func DialFile(addr, securityKey, machineName string, machineID uint32, timeout time.Duration) (*Conn, error) {
-	raw, err := net.DialTimeout("tcp", addr, timeout)
+	raw, err := dial(addr, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial file channel: %w", err)
 	}

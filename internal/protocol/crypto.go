@@ -4,10 +4,17 @@ package protocol
 import (
 	"crypto/sha512"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"golang.org/x/crypto/pbkdf2"
 )
+
+// ErrMagicMismatch reports that a packet's magic number does not match the
+// one derived from this machine's security key. A well-formed first packet
+// that fails this way is almost always a real peer configured with a
+// different key, not random traffic, so callers can tell the user.
+var ErrMagicMismatch = errors.New("magic mismatch")
 
 const (
 	aesKeySize   = 32
@@ -75,7 +82,7 @@ func ValidatePacket(buf []byte, magic uint32) error {
 	wireMagic := uint32(buf[3])<<24 + uint32(buf[2])<<16
 	expectedMagic := magic & 0xFFFF0000
 	if wireMagic != expectedMagic {
-		return fmt.Errorf("magic mismatch: wire=0x%08X expected=0x%08X", wireMagic, expectedMagic)
+		return fmt.Errorf("%w: wire=0x%08X expected=0x%08X", ErrMagicMismatch, wireMagic, expectedMagic)
 	}
 	var checksum byte
 	for i := 2; i < PacketSize; i++ {

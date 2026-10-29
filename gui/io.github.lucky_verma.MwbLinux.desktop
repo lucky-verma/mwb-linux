@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mouse Without Borders
+Comment=Share keyboard, mouse and clipboard with another computer
+Exec=mwb-gui
+Icon=input-mouse
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=mouse;keyboard;share;clipboard;kvm;powertoys;mwb;
+StartupNotify=true

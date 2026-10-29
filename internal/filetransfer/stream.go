@@ -127,7 +127,7 @@ func Sendable(path string, maxSize int64) (int64, error) {
 	if info.IsDir() {
 		// MWB does not transfer directories either; the documented workaround
 		// is to zip them first.
-		return 0, fmt.Errorf("%w: %s is a directory", ErrUnsafeName, path)
+		return 0, fmt.Errorf("%w: %s", ErrFolder, path)
 	}
 	if !info.Mode().IsRegular() {
 		return 0, fmt.Errorf("%w: %s is not a regular file", ErrUnsafeName, path)

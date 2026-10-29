@@ -157,3 +157,72 @@ func TestCanonicalKeyboardLayout(t *testing.T) {
 		}
 	}
 }
+
+// Two mwb-linux peers encode keys with KeyCodeToVK and decode them with the
+// positional "us" profile. Every key the sender can encode must arrive as the
+// same physical key, or typing on one Linux machine produces the wrong key on
+// the other.
+func TestLinuxToLinuxKeysRoundTrip(t *testing.T) {
+	checked := 0
+	for code := uint16(1); code < 0x300; code++ {
+		vk, ok := KeyCodeToVK(code)
+		if !ok {
+			continue
+		}
+		back, ok := VKToKeyCodeForLayout(vk, "us")
+		if !ok || back != code {
+			t.Errorf("evdev %d -> VK 0x%X -> evdev %d (ok=%v)", code, vk, back, ok)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no keys checked")
+	}
+}
+
+// Media, browser and launch keys and F13-F24 cross between machines, and the
+// virtual keyboard can type them.
+func TestExtraKeysMapBothWays(t *testing.T) {
+	keys := map[int32]uint16{
+		0xB3: KEY_PLAYPAUSE, 0xB0: KEY_NEXTSONG, 0xB1: KEY_PREVIOUSSONG, 0xB2: KEY_STOPCD,
+		0xA6: KEY_BACK, 0xA7: KEY_FORWARD, 0xAA: KEY_SEARCH, 0xAC: KEY_HOMEPAGE,
+		0xB4: KEY_MAIL, 0xB7: KEY_CALC, 0x5F: KEY_SLEEP,
+		0x7C: KEY_F13, 0x87: KEY_F24,
+	}
+	used := map[uint16]bool{}
+	for _, code := range usedKeyCodes() {
+		used[code] = true
+	}
+	for vk, code := range keys {
+		if got, ok := VKToKeyCode(vk); !ok || got != code {
+			t.Errorf("VK 0x%X -> %d (ok=%v), want %d", vk, got, ok, code)
+		}
+		if got, ok := KeyCodeToVK(code); !ok || got != vk {
+			t.Errorf("evdev %d -> VK 0x%X (ok=%v), want 0x%X", code, got, ok, vk)
+		}
+		if !used[code] {
+			t.Errorf("virtual keyboard does not register evdev %d", code)
+		}
+	}
+}
+
+// Keypad Enter travels as an extended VK_RETURN and comes back as itself.
+func TestKeypadEnterRoundTrip(t *testing.T) {
+	vk, extended, ok := KeyCodeToVKExtended(KEY_KPENTER)
+	if !ok || vk != 0x0D || !extended {
+		t.Fatalf("KP Enter -> VK 0x%X extended=%v ok=%v", vk, extended, ok)
+	}
+	if code, ok := ExtendedKeyCode(vk); !ok || code != KEY_KPENTER {
+		t.Fatalf("extended VK_RETURN -> %d", code)
+	}
+	if _, extended, _ := KeyCodeToVKExtended(KEY_ENTER); extended {
+		t.Fatal("the main Enter key was marked extended")
+	}
+	found := false
+	for _, code := range usedKeyCodes() {
+		found = found || code == KEY_KPENTER
+	}
+	if !found {
+		t.Fatal("virtual keyboard does not register KP Enter")
+	}
+}

@@ -49,3 +49,25 @@ func TestClipboardFileTargetPrefersGNOME(t *testing.T) {
 		t.Fatalf("fallback target = %q, want %q", got, uriListTarget)
 	}
 }
+
+// TestFileClipHashDetectsRecopy locks in the fix for a repeat copy of the same
+// file: the path alone cannot distinguish a fresh copy from the clipboard
+// simply still holding the file, so the copy generation (raised by the XFIXES
+// watcher on each real copy) is part of the identity.
+func TestFileClipHashDetectsRecopy(t *testing.T) {
+	paths := []string{"/home/u/doc.docx"}
+
+	// The clipboard sitting unchanged: same generation, same hash -> no re-send.
+	if fileClipHash(7, paths) != fileClipHash(7, paths) {
+		t.Fatal("an unchanged clipboard must hash the same, or it would re-send every poll")
+	}
+	// A fresh copy of the same file: the watcher bumps the generation, so the
+	// hash differs and the file is sent again.
+	if fileClipHash(7, paths) == fileClipHash(8, paths) {
+		t.Fatal("a repeat copy (new generation) must differ, or it would never re-send")
+	}
+	// A different file is distinct regardless of generation.
+	if fileClipHash(7, paths) == fileClipHash(7, []string{"/home/u/other.docx"}) {
+		t.Fatal("different files must hash differently")
+	}
+}

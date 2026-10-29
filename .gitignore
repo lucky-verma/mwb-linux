@@ -31,3 +31,4 @@ graphify-out/
 
 # goreleaser build output
 dist/
+__pycache__/

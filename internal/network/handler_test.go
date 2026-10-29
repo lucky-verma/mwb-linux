@@ -385,3 +385,52 @@ func TestHandleMiddleButton(t *testing.T) {
 		t.Errorf("expected BTN_MIDDLE down, got %v", mock.ButtonDowns)
 	}
 }
+
+func TestHideMouseRunsHookWhenSet(t *testing.T) {
+	called := 0
+	h := &Handler{OnHideMouse: func() { called++ }}
+	h.HandlePacket(&protocol.Packet{Type: protocol.HideMouse})
+	if called != 1 {
+		t.Fatalf("OnHideMouse called %d times, want 1", called)
+	}
+}
+
+// A PowerToys peer also sends HideMouse; without a hook it stays log-only.
+func TestHideMouseWithoutHookIsHarmless(t *testing.T) {
+	h := &Handler{}
+	h.HandlePacket(&protocol.Packet{Type: protocol.HideMouse})
+}
+
+func TestLinuxPeerInfoReachesHook(t *testing.T) {
+	var got protocol.PeerInfo
+	calls := 0
+	h := &Handler{OnPeerInfo: func(i protocol.PeerInfo) { got = i; calls++ }}
+	want := protocol.PeerInfo{ScreenWidth: 2560, ScreenHeight: 1440, Edge: "right", Sharing: true}
+	h.HandlePacket(protocol.NewPeerInfoPacket(1, 2, want))
+	if calls != 1 || got != want {
+		t.Fatalf("OnPeerInfo got %+v (%d calls), want %+v", got, calls, want)
+	}
+	// Without a hook (PowerToys path) and with an unknown version: ignored.
+	(&Handler{}).HandlePacket(protocol.NewPeerInfoPacket(1, 2, want))
+	bad := protocol.NewPeerInfoPacket(1, 2, want)
+	bad.Mouse.DwFlags = 42
+	h.HandlePacket(bad)
+	if calls != 1 {
+		t.Fatal("an unknown-version packet reached the hook")
+	}
+}
+
+// Windows marks keypad Enter as an extended VK_RETURN; plain VK_RETURN is the
+// main Enter key.
+func TestHandleKeyboardKeypadEnter(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	pkt := &protocol.Packet{Type: protocol.Keyboard}
+	pkt.Keyboard.WVk = 0x0D
+	h.HandlePacket(pkt)
+	pkt.Keyboard.DwFlags = protocol.LLKHF_EXTENDED
+	h.HandlePacket(pkt)
+	if len(mock.KeyDowns) != 2 || mock.KeyDowns[0] != input.KEY_ENTER || mock.KeyDowns[1] != input.KEY_KPENTER {
+		t.Fatalf("got %v, want [KEY_ENTER KEY_KPENTER]", mock.KeyDowns)
+	}
+}

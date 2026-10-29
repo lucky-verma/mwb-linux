@@ -25,16 +25,27 @@ const (
 	MachineSwitched      PackageType = 77
 	ClipboardAsk         PackageType = 78
 	ClipboardPush        PackageType = 79
-	NextMachine          PackageType = 121
-	Keyboard             PackageType = 122
-	Mouse                PackageType = 123
-	ClipboardText        PackageType = 124
-	ClipboardImage       PackageType = 125
-	Handshake            PackageType = 126
-	HandshakeAck         PackageType = 127
-	Matrix               PackageType = 128
-	Invalid              PackageType = 0xFF
-	Error                PackageType = 0xFE
+	// LinuxPeerInfo is an mwb-linux extension, sent only to another
+	// mwb-linux (peer = "linux"), never to PowerToys. The value is unused in
+	// the PowerToys enum and below Matrix, so it is a plain 32-byte packet.
+	// See peerinfo.go.
+	LinuxPeerInfo PackageType = 100
+	// LinuxGroup and LinuxCursor are the mwb-linux group extensions, sent
+	// only between mwb-linux machines: a chunk of a group document (layout and
+	// members) and where the shared cursor is. Plain 32-byte packets, like
+	// LinuxPeerInfo; older mwb-linux builds ignore them. See group.go.
+	LinuxGroup     PackageType = 101
+	LinuxCursor    PackageType = 102
+	NextMachine    PackageType = 121
+	Keyboard       PackageType = 122
+	Mouse          PackageType = 123
+	ClipboardText  PackageType = 124
+	ClipboardImage PackageType = 125
+	Handshake      PackageType = 126
+	HandshakeAck   PackageType = 127
+	Matrix         PackageType = 128
+	Invalid        PackageType = 0xFF
+	Error          PackageType = 0xFE
 )
 
 // ClipboardPostAction tells the peer what to do with a file it receives. MWB

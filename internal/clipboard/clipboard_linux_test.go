@@ -24,7 +24,7 @@ func controlPair(t *testing.T) (*network.Conn, *network.Conn) {
 	_ = probe.Close()
 
 	stop := make(chan struct{})
-	incoming, err := network.ListenAndAccept(port, "TestSecurityKey!!", "windows", "127.0.0.1", nil, stop)
+	incoming, err := network.ListenAndAccept(port, "TestSecurityKey!!", "windows", "127.0.0.1", nil, nil, stop)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Launcher for mwb-gui. Finds the mwb_gui package next to this script or in
+the shared install location used by `make install-gui`."""
+
+import os
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+for candidate in (here, os.path.join(here, "..", "share", "mwb-gui")):
+    if os.path.isdir(os.path.join(candidate, "mwb_gui")):
+        sys.path.insert(0, os.path.abspath(candidate))
+        break
+
+try:
+    import gi
+
+    gi.require_foreign("cairo")  # drawing needs python3-gi-cairo
+    from mwb_gui.app import main
+except (ImportError, ValueError) as exc:
+    sys.stderr.write(
+        f"mwb-gui needs GTK 4 for Python: {exc}\n"
+        "Install it with: sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0\n"
+    )
+    sys.exit(1)
+
+sys.exit(main())

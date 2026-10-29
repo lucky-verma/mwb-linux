@@ -54,8 +54,11 @@ type Manager struct {
 	OnFileCopy func(paths []string)
 
 	conn        *network.Conn
+	peers       func() []*network.Conn // group mode: every member online now
 	display     string
+	wayland     bool   // read with wl-paste: the native clipboard is not mirrored to X11
 	lastHash    string // hash of last clipboard content we sent
+	clipGen     int64  // bumped by the XFIXES watcher on each CLIPBOARD copy
 	mu          sync.Mutex
 	recvBuf     bytes.Buffer // accumulates incoming clipboard chunks
 	receiving   bool
@@ -85,17 +88,66 @@ func NewManager(conn *network.Conn, display string) *Manager {
 	return m
 }
 
+// NewGroupManager creates a clipboard manager that shares with every machine
+// peers returns, for a group of mwb-linux machines.
+func NewGroupManager(peers func() []*network.Conn, display string) *Manager {
+	m := NewManager(nil, display)
+	m.peers = peers
+	return m
+}
+
+// conns returns where clipboard changes go.
+func (m *Manager) conns() []*network.Conn {
+	if m.peers != nil {
+		return m.peers()
+	}
+	if m.conn != nil {
+		return []*network.Conn{m.conn}
+	}
+	return nil
+}
+
+// broadcast sends pkts, in order, over every connection, each stamped with
+// that connection's machine ID. It reports whether every send succeeded.
+func (m *Manager) broadcast(pkts []*protocol.Packet) bool {
+	ok := true
+	for _, conn := range m.conns() {
+		for _, tmpl := range pkts {
+			p := *tmpl
+			p.Src = conn.MachineID
+			if err := conn.SendPacket(&p); err != nil {
+				slog.Error("send clipboard failed", "remote", conn.RemoteName, "err", err)
+				ok = false
+				break
+			}
+		}
+	}
+	return ok
+}
+
 // Start begins monitoring the local clipboard for changes.
 func (m *Manager) Start() {
 	// A connection/restart is not a clipboard change. Baseline the selection
 	// already owned by Linux so it is not pushed to Windows as if the user had
 	// just copied it. Only changes observed after Start are transmitted.
+	m.wayland = useWaylandRead()
 	m.seedLocalClipboardHash()
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		m.pollClipboard()
 	}()
+	// Detect a repeat copy of the same file: the path alone cannot tell a fresh
+	// copy from one that is simply still on the clipboard, so watch the X
+	// selection for ownership changes. Degrades to path comparison if XFIXES is
+	// unavailable.
+	if m.OnFileCopy != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.watchSelectionChanges()
+		}()
+	}
 	slog.Info("clipboard sharing enabled")
 }
 
@@ -194,9 +246,12 @@ func (m *Manager) clearPendingRemoteClipboard() {
 // a peer's clipboard when a TCP connection was established.
 func (m *Manager) seedLocalClipboardHash() {
 	var hash string
+	m.mu.Lock()
+	gen := m.clipGen
+	m.mu.Unlock()
 	if m.OnFileCopy != nil {
 		if paths := m.getLocalFileClipboard(); len(paths) > 0 {
-			hash = "file:" + strings.Join(paths, "\x00")
+			hash = fileClipHash(gen, paths)
 		}
 	}
 	if hash == "" {
@@ -218,6 +273,15 @@ func (m *Manager) seedLocalClipboardHash() {
 	}
 	m.mu.Unlock()
 	slog.Debug("initial Linux clipboard baselined", "hasContent", hash != "")
+}
+
+// fileClipHash identifies a file selection for change detection. The copy
+// generation (from the XFIXES watcher) is part of it so that re-copying the
+// same file — same paths, new ownership — is seen as new rather than as the
+// unchanged clipboard still sitting there. With XFIXES unavailable the
+// generation stays 0 and this reduces to the paths alone.
+func fileClipHash(gen int64, paths []string) string {
+	return fmt.Sprintf("file:%d:%s", gen, strings.Join(paths, "\x00"))
 }
 
 // pollClipboard monitors the local clipboard for changes.
@@ -242,8 +306,8 @@ func (m *Manager) pollClipboard() {
 			// must be checked before text or the path gets sent as a string.
 			if m.OnFileCopy != nil {
 				if paths := m.getLocalFileClipboard(); len(paths) > 0 {
-					hash := "file:" + strings.Join(paths, "\x00")
 					m.mu.Lock()
+					hash := fileClipHash(m.clipGen, paths)
 					changed := hash != m.lastHash
 					if changed {
 						m.lastHash = hash
@@ -334,40 +398,8 @@ func (m *Manager) sendText(text string) {
 		return
 	}
 
-	// Chunk into 48-byte packets
-	for offset := 0; offset < len(compressed); offset += dataSize {
-		end := offset + dataSize
-		if end > len(compressed) {
-			end = len(compressed)
-		}
-		chunk := compressed[offset:end]
-
-		pkt := &protocol.Packet{
-			Type: protocol.ClipboardText,
-			Src:  m.conn.MachineID,
-			Des:  protocol.IDAll,
-		}
-		// Copy chunk into packet payload (bytes 16-63)
-		// We need to set the raw bytes — use Mouse fields as overlay
-		// The packet Marshal will handle this via the ClipboardText case
-		pkt.ClipboardData = make([]byte, dataSize)
-		copy(pkt.ClipboardData, chunk)
-
-		if err := m.conn.SendPacket(pkt); err != nil {
-			slog.Error("send clipboard chunk failed", "err", err)
-			return
-		}
-	}
-
-	// Send end marker
-	endPkt := &protocol.Packet{
-		Type: protocol.ClipboardDataEnd,
-		Src:  m.conn.MachineID,
-		Des:  protocol.IDAll,
-	}
-	endPkt.ClipboardData = make([]byte, dataSize)
-	if err := m.conn.SendPacket(endPkt); err != nil {
-		slog.Error("send clipboard end failed", "err", err)
+	if !m.broadcast(clipboardPackets(protocol.ClipboardText, compressed)) {
+		return
 	}
 
 	slog.Info("clipboard sent to remote", "chunks", (len(compressed)+dataSize-1)/dataSize)
@@ -538,6 +570,13 @@ func (m *Manager) handleImageClipboard(data []byte) {
 // getLocalClipboard reads the current clipboard text.
 // Times out after execTimeout to prevent blocking the poll goroutine indefinitely.
 func (m *Manager) getLocalClipboard() string {
+	if m.wayland {
+		out, err := wlPaste("text")
+		if err != nil {
+			return ""
+		}
+		return string(out)
+	}
 	for _, args := range [][]string{
 		{"xclip", "-selection", "clipboard", "-o"},
 		{"xsel", "--clipboard", "--output"},
@@ -576,20 +615,11 @@ func (m *Manager) setLocalClipboard(text string) {
 
 // getLocalImageClipboard checks if clipboard contains an image and returns it.
 func (m *Manager) getLocalImageClipboard() []byte {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	out, err := cmd.Output()
-	cancel()
+	out, err := m.readClipboard("TARGETS")
 	if err != nil || !strings.Contains(string(out), "image/png") {
 		return nil
 	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-	cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-	cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
-	imgData, err := cmd2.Output()
-	cancel2()
+	imgData, err := m.readClipboard("image/png")
 	if err != nil || len(imgData) == 0 {
 		return nil
 	}
@@ -603,40 +633,43 @@ func (m *Manager) sendImage(data []byte) {
 		return
 	}
 
-	// Chunk into 48-byte packets
-	for offset := 0; offset < len(data); offset += dataSize {
-		end := offset + dataSize
-		if end > len(data) {
-			end = len(data)
-		}
-		chunk := data[offset:end]
-
-		pkt := &protocol.Packet{
-			Type: protocol.ClipboardImage,
-			Src:  m.conn.MachineID,
-			Des:  protocol.IDAll,
-		}
-		pkt.ClipboardData = make([]byte, dataSize)
-		copy(pkt.ClipboardData, chunk)
-
-		if err := m.conn.SendPacket(pkt); err != nil {
-			slog.Error("send image chunk failed", "err", err)
-			return
-		}
-	}
-
-	// End marker
-	endPkt := &protocol.Packet{
-		Type: protocol.ClipboardDataEnd,
-		Src:  m.conn.MachineID,
-		Des:  protocol.IDAll,
-	}
-	endPkt.ClipboardData = make([]byte, dataSize)
-	if err := m.conn.SendPacket(endPkt); err != nil {
-		slog.Error("send clipboard end failed", "err", err)
+	if !m.broadcast(clipboardPackets(protocol.ClipboardImage, data)) {
+		return
 	}
 
 	slog.Info("image clipboard sent to remote", "chunks", (len(data)+dataSize-1)/dataSize)
+}
+
+// clipboardPackets splits data into 48-byte chunks of type t, followed by
+// the end marker.
+func clipboardPackets(t protocol.PackageType, data []byte) []*protocol.Packet {
+	var pkts []*protocol.Packet
+	for offset := 0; offset < len(data); offset += dataSize {
+		chunk := data[offset:min(offset+dataSize, len(data))]
+		pkt := &protocol.Packet{Type: t, Des: protocol.IDAll}
+		pkt.ClipboardData = make([]byte, dataSize)
+		copy(pkt.ClipboardData, chunk)
+		pkts = append(pkts, pkt)
+	}
+	end := &protocol.Packet{Type: protocol.ClipboardDataEnd, Des: protocol.IDAll}
+	end.ClipboardData = make([]byte, dataSize)
+	return append(pkts, end)
+}
+
+// readClipboard returns the local clipboard's content of type target;
+// "TARGETS" lists the offered types, one per line.
+func (m *Manager) readClipboard(target string) ([]byte, error) {
+	if m.wayland {
+		if target == "TARGETS" {
+			return wlPaste("")
+		}
+		return wlPaste(target)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", target, "-o")
+	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+	return cmd.Output()
 }
 
 // encodeUTF16LE encodes a Go string to UTF-16LE bytes.

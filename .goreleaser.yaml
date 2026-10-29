@@ -42,7 +42,9 @@ nfpms:
     description: |-
       Mouse Without Borders for Linux.
       Share keyboard, mouse, and clipboard seamlessly between Linux and
-      Windows machines running Microsoft PowerToys Mouse Without Borders.
+      Windows machines running Microsoft PowerToys Mouse Without Borders,
+      or between two Linux machines. Includes the mwb-gui settings window
+      and tray icon.
     license: MIT
     section: utils
     priority: optional
@@ -53,6 +55,16 @@ nfpms:
       - xdotool
       - xclip
       - x11-xserver-utils
+    # mwb-gui needs GTK 4 for Python. Recommended rather than required, so
+    # mwb itself still installs on a headless or GTK-less machine.
+    recommends:
+      - python3
+      - python3-gi
+      - python3-gi-cairo
+      - gir1.2-gtk-4.0
+      # Reads the clipboard of Wayland apps on KDE and wlroots desktops,
+      # which keep it apart from X11 apps.
+      - wl-clipboard
     contents:
       - src: ./packaging/mwb.service
         dst: /usr/lib/systemd/user/mwb.service
@@ -60,6 +72,24 @@ nfpms:
         dst: /etc/udev/rules.d/99-mwb-uinput.rules
       - src: ./packaging/99-mwb-libinput.rules
         dst: /etc/udev/rules.d/99-mwb-libinput.rules
+      # Settings window and tray icon. The launcher finds the package in
+      # ../share/mwb-gui next to itself.
+      - src: ./gui/mwb-gui
+        dst: /usr/local/bin/mwb-gui
+        file_info:
+          mode: 0755
+      - src: ./gui/mwb_gui/*.py
+        dst: /usr/local/share/mwb-gui/mwb_gui/
+        file_info:
+          mode: 0644
+      - src: ./gui/io.github.lucky_verma.MwbLinux.desktop
+        dst: /usr/share/applications/io.github.lucky_verma.MwbLinux.desktop
+        file_info:
+          mode: 0644
+      - src: ./gui/io.github.lucky_verma.MwbLinux.Tray.desktop
+        dst: /etc/xdg/autostart/io.github.lucky_verma.MwbLinux.Tray.desktop
+        file_info:
+          mode: 0644
       - src: ./README.md
         dst: /usr/share/doc/mwb-linux/README.md
       - src: ./LICENSE

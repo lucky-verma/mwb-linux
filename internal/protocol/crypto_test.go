@@ -3,6 +3,7 @@ package protocol
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -94,6 +95,20 @@ func TestChecksumAndMagic(t *testing.T) {
 	buf[15] ^= 0xFF
 	if err := ValidatePacket(buf, magic); err == nil {
 		t.Error("validation should fail after corruption")
+	}
+}
+
+func TestValidatePacketWrongKeyIsMagicMismatch(t *testing.T) {
+	p := &Packet{Type: Mouse, ID: 1, Src: 1, Des: 2}
+	buf := p.Marshal()
+	StampPacket(buf, Get24BitHash("the-sender-key"))
+
+	err := ValidatePacket(buf, Get24BitHash("a-different-key"))
+	if err == nil {
+		t.Fatal("a packet stamped with another key should not validate")
+	}
+	if !errors.Is(err, ErrMagicMismatch) {
+		t.Errorf("err = %v, want errors.Is ErrMagicMismatch", err)
 	}
 }
 

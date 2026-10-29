@@ -6,6 +6,197 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **A copied file follows the pointer.** In a group of three or more, a copied
+  file is now sent to the one machine the pointer is on, instead of to every
+  machine at once — so a large file travels across the network once, not once
+  per machine. When the pointer is on this machine, or its place is unknown,
+  the file still goes to everyone, as before. Clipboard text and images are
+  small and are still shared with the whole group.
+
+### Added
+- **Forget** a computer in a group: click a screen in the arrangement to
+  select it, and a Forget button removes that computer from the group on every
+  machine, not just this one. It leaves the picture at once. Until now a
+  machine could only ever be learned, never dropped, so an offline one lingered
+  in the row forever and a plain local delete was undone the moment another
+  machine gossiped it back. Forgetting records a tombstone that the whole group
+  adopts, so the machine stays gone — and if you later turn it back on, it
+  rejoins on its own by connecting in person.
+- When this machine adopts another's screen order and its shared edge moves to
+  the opposite side, mwb-gui now says which machine set the order and how to
+  change it, and the log records the adoption. Previously the pointer would
+  silently stop crossing the edge you expected, with no hint that the shared
+  edge had moved to the other side.
+- A wrong security key no longer looks like "not connected". When a computer
+  reaches this one with a different key, the connection it rejects is noticed,
+  mwb-gui says plainly that a computer is trying with a different security key
+  and names its address, and the log records it as such instead of as a silent
+  first-packet failure. (The message appears on the computer that is reached;
+  the dialing side learns nothing back, as the connection is refused before any
+  reply.)
+- More of the keyboard and mouse reach the other computer: the mouse's
+  back and forward side buttons, the tilt wheel, two-finger sideways
+  scrolling on a touchpad, play/pause, next and previous track, the
+  browser, mail, calculator and sleep keys, F13–F24, and keypad Enter (sent
+  as Windows does, so it stays keypad Enter).
+- `interface` setting and a **Network** choice in mwb-gui: listen and
+  connect on one network interface only (Wi-Fi, Ethernet, VPN), saved by
+  name. The window lists every interface with its address, and the
+  address it tells you to enter on the other computer follows the choice.
+  mwb waits while the chosen interface has no address.
+- **Clear saved settings…** in mwb-gui: forgets the security key,
+  addresses, screen order and remembered computers after a confirmation,
+  keeping the old file as `config.toml.bak`, so you can set up from scratch.
+- First run: mwb-gui opens with a Linux peer, a new security key and
+  "wait for the other computer" filled in, so one Save starts listening.
+- Groups of up to six Linux machines (`peer = "linux"`), side by side in one
+  row. Enter any one member's address; the machines share each other's
+  addresses and connect to all of them. The pointer walks across every
+  screen, skipping offline machines, and any machine's keyboard and mouse
+  drive it. The screen order (`layout`) stays in sync, the most recent
+  choice winning, and mwb-gui shows every screen, lets you drag them into
+  order, and lists which machines are online. Two machines set up before
+  keep their `edge` until a layout is saved. Replaces the two-machine side
+  sync; every machine needs this version.
+- When a Linux machine's connection ends, keys and mouse buttons it was
+  holding down on this machine are released instead of staying stuck.
+- `mwb-gui` tray icon. Closing the window keeps it in the tray; clicking the
+  icon opens the window again, and its right-click menu shows the connection
+  state, starts or stops sharing, and quits, which also stops mwb. It starts
+  at login (`mwb-gui --background`) once mwb is set up. Uses the
+  StatusNotifierItem protocol over D-Bus, so it needs no extra packages.
+
+### Changed (Linux pairs only)
+- `bidirectional` now defaults to on for `peer = "linux"`, because two
+  receive-only machines connect but never move the cursor. An explicit `false`
+  is still honored, and PowerToys peers keep receive-only.
+
+### Changed
+- The remote cursor accelerates like a local one: the gain grows with how fast
+  the mouse moves, from `accel_multiplier` when slow up to three times that
+  for a fast flick, so crossing the other screen no longer takes several
+  swipes. Touchpad movement is faster too, and `accel_multiplier` now scales
+  it as well.
+
+### Fixed
+- Smoother pointer on the other computer, especially over Wi-Fi. Each
+  mouse report now travels as one move instead of one per axis (half the
+  packets), sending never holds up reading the mouse, and when the network
+  stalls the pointer jumps to where the mouse is instead of replaying the
+  backlog in slow motion. The receiving side writes each move to its
+  virtual mouse in one system call.
+- When a Linux machine drops off the network while the pointer is on it,
+  the others notice within 5 seconds instead of 20 and give you back your
+  keyboard and mouse. Linux machines now exchange a heartbeat every second;
+  PowerToys connections are unchanged.
+- A Bluetooth mouse or keyboard that reconnects, for example after the
+  screen turns off, works with mwb again. It often comes back under the
+  same device path, and mwb kept the old, closed device: the mouse moved
+  only the local pointer instead of crossing, and while the pointer was on
+  the other computer the touchpad looked frozen. mwb now forgets a device
+  that disappears and checks for new ones every 2 seconds, grabbing them
+  right away when the pointer is on another computer.
+- Two Linux machines no longer echo heartbeats back and forth. Each echo
+  was answered again, so the traffic grew for as long as they stayed
+  connected: mwb used 20–60% of a CPU core when idle, and a dropped
+  connection logged thousands of "send heartbeat response" errors. A
+  failed reply now ends the connection at once.
+- A link no longer goes silent for 20 seconds after either machine starts.
+  The configured address and the remembered one were both dialed, and the
+  two machines could keep different sockets.
+- mwb-gui no longer says the other computer "runs an older mwb" for the
+  moment after it connects, before its group details arrive.
+- On KDE Plasma under Wayland, nothing copied in a Wayland app reached the
+  other computers: KDE copies the clipboard to X11 apps, which mwb read,
+  only while an X11 window has focus. mwb now asks the compositor whether
+  it offers a data-control protocol and then reads the clipboard with
+  `wl-paste` (the package recommends `wl-clipboard`). GNOME keeps using
+  X11, which it mirrors eagerly.
+- Copying a folder now says folders can't be copied (copy a zip instead)
+  rather than reporting an "unsafe file name".
+- A fresh install with no `config.toml` made the service exit and restart
+  every 5 seconds. mwb now keeps running, reports "not set up" to the
+  settings window, and starts by itself as soon as the settings are saved.
+  A config it cannot use is reported the same way instead of crash-looping.
+- In a Linux group on Wayland the cursor never crossed from a machine: its
+  edge windows were never re-armed after connecting.
+- A machine with an extended desktop (a laptop with a second monitor)
+  measured only its first monitor, so the edge it watched and the size it
+  reported to the others were wrong. It now uses the whole desktop.
+- Copying a file to a Linux machine whose configured address had gone stale
+  failed with "no route to host" even though it was connected: files went to
+  `host` instead of the address the connection actually uses. They now go to
+  the live connection's address.
+- A file received from the other computer is offered on the clipboard in
+  every format Linux file managers paste from (GNOME, MATE/Caja, uri-list,
+  plain path), instead of one guessed from `XDG_CURRENT_DESKTOP`, which is
+  often missing for a background service. Paste now works in Caja, Thunar,
+  Dolphin and Nautilus alike, and files copied in Caja are sent.
+- The release `.deb` built by GoReleaser now includes `mwb-gui`, its menu
+  entry and the tray icon's login entry, as the README describes, and
+  recommends the GTK 4 Python packages it needs.
+- A touchpad could not control the other computer: its first touch handed the
+  cursor straight back, because touchpads report absolute finger positions.
+  mwb now translates them while the cursor is remote: one finger moves, a tap
+  clicks (two fingers right-click, three middle-click), two fingers scroll,
+  and pressing the pad with two fingers right-clicks. Touchscreens still
+  bring the cursor back. Touchpad motion also re-arms the Wayland edge.
+- The cursor never crossed to the other computer from a Wayland session
+  (GNOME, Zorin, Ubuntu). XWayland only learns the pointer position while it
+  is over an X11 window, so polling saw a frozen position and never reached
+  the edge. On Wayland, an invisible one-pixel XWayland window along the
+  shared edge now reports the touch, and the edge re-arms once the physical
+  mouse moves back inward. A reconnect while the cursor sits on that edge no
+  longer switches straight to the other computer.
+- A Bluetooth LE mouse or keyboard kept moving the local cursor while it also
+  drove the other computer. BlueZ exposes them through uhid, under
+  `/sys/devices/virtual/`, so they were mistaken for software devices and
+  never grabbed.
+- Clicking the screen arrangement now swaps the two screens. Before, a click on
+  this computer's own screen put the other computer on that side, which is how
+  both machines ended up with the other on the same side. The hint names the
+  side the other computer is on, and the "both put the other on the same side"
+  message says which way to fix it.
+- A `/dev/uinput` error now names its actual cause and the one fix that
+  applies, instead of printing every setup step twice (once inside the error
+  text and again from `main.go`, plus a duplicated last line). The causes are:
+  module not loaded, not in the `input` group, added to the group but the
+  session predates it, or the device not shared with the group.
+
+### Added
+- Linux pairs keep their sides mirrored. The settings window records when the
+  side was chosen (`edge_changed`), each machine sends how long ago that was
+  (LinuxPeerInfo format 2), and when both put the other on the same side the
+  older choice adopts the mirror of the newer one, saves it and reconnects.
+  With no recorded time on either side, the machine whose name sorts last
+  adopts. `-edge` on the command line opts out.
+- Wait/Connect pairing: with `peer = "linux"`, `host` may be empty. That
+  machine then waits for the other to connect, accepting only local-network
+  sources with the shared key, and shows its own address to enter on the
+  other machine.
+- Linux peers exchange their screen size, side and sharing mode when they
+  connect. A peer's measured screen size replaces `remote_width` and
+  `remote_height`. Same-side layouts and "neither computer shares" are
+  reported in the log and the settings window.
+- Linux-to-Linux pairing: set `peer = "linux"` on two mwb-linux machines to
+  share one keyboard and mouse with no Windows PC. Both machines keep the same
+  connection, a link silent for 20s is redialed, and each machine tells the
+  other when it takes or hands back the cursor (`MachineSwitched` and
+  `HideMouse`). The default `peer = "windows"` behaves exactly as before.
+- `bidirectional` config setting, so the user service can run bidirectionally.
+  An explicit `-bidi` / `-bidi=false` flag still wins.
+- `mwb genkey` prints a random 24-character security key.
+- Connection status file at `$XDG_RUNTIME_DIR/mwb/status.json` (owner-only,
+  no secrets).
+- `mwb-gui`, an optional GTK 4 settings and status window (`make install-gui`).
+  It edits only the settings you change and keeps the rest of `config.toml`.
+  It reports a service stuck restarting after errors as such (not "Running"),
+  and diagnoses `/dev/uinput` access itself.
+- The `.deb` now includes `mwb-gui` and an app-menu entry, recommends its GTK
+  packages, and adds the installing `sudo` user to the `input` group (as
+  `scripts/install.sh` already did). `make deb` builds it locally.
+
 ## [0.6.3] - 2026-09-15
 
 ### Compatibility

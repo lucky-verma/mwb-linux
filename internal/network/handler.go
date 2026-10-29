@@ -50,6 +50,16 @@ type Handler struct {
 	// Windows 1:1 (the default). Inbound is absolute, so this applies a constant
 	// gain to per-packet deltas rather than a true acceleration curve.
 	InboundMultiplier float64
+	// OnHideMouse optionally runs when the peer says the cursor has left this
+	// machine. Only wired for a Linux peer, which sends HideMouse when it takes
+	// the cursor back; nil keeps the original log-only handling.
+	OnHideMouse func()
+	// OnPeerInfo optionally receives a Linux peer's settings (LinuxPeerInfo).
+	// Only wired for peer = "linux"; nil ignores the packet.
+	OnPeerInfo func(protocol.PeerInfo)
+	// OnGroup optionally receives the mwb-linux group packets (LinuxGroup
+	// and LinuxCursor). Only wired for peer = "linux"; nil ignores them.
+	OnGroup func(*protocol.Packet)
 	// KeyboardLayout selects the inbound Windows VK -> Linux evdev mapping.
 	KeyboardLayout  string
 	pendingCtrl     bool
@@ -81,7 +91,7 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		slog.Info("MachineSwitched: cursor switched to us", "src", pkt.Src)
 		now := time.Now()
 		h.ActivatedAt = &now
-		h.inSeeded = false // reseed inbound tracker so the entry move snaps, not scales
+		h.Reseed()
 		if h.OnBecameActive != nil {
 			h.OnBecameActive()
 		}
@@ -90,6 +100,9 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		}
 	case protocol.HideMouse:
 		slog.Debug("HideMouse received — cursor leaving us", "src", pkt.Src)
+		if h.OnHideMouse != nil {
+			h.OnHideMouse()
+		}
 	case protocol.NextMachine:
 		if h.ShouldReclaim != nil && !h.ShouldReclaim(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta) {
 			slog.Debug("NextMachine ignored — requested landing point is not on our shared edge",
@@ -111,11 +124,31 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		if h.Clipboard != nil {
 			h.Clipboard.HandlePacket(pkt)
 		}
+	case protocol.LinuxPeerInfo:
+		info, ok := pkt.PeerInfo()
+		if !ok {
+			slog.Debug("ignoring LinuxPeerInfo in an unknown format", "src", pkt.Src)
+			return
+		}
+		if h.OnPeerInfo != nil {
+			h.OnPeerInfo(info)
+		}
+	case protocol.LinuxGroup, protocol.LinuxCursor:
+		if h.OnGroup != nil {
+			h.OnGroup(pkt)
+		}
 	case protocol.Hello, protocol.Awake, protocol.HandshakeAck:
 		// expected control packets — ignore silently
 	default:
 		slog.Debug("unhandled packet type", "type", pkt.Type)
 	}
+}
+
+// Reseed makes the next inbound move snap to the reported position instead of
+// scaling from the last one: the cursor just arrived, so there is no motion
+// to continue.
+func (h *Handler) Reseed() {
+	h.inSeeded = false // reseed inbound tracker so the entry move snaps, not scales
 }
 
 func (h *Handler) handleMouse(pkt *protocol.Packet) {
@@ -286,6 +319,11 @@ func (h *Handler) keyCodeForPacket(kd protocol.KeyboardData) (uint16, bool) {
 		}
 		return input.KEY_LEFTALT, true
 	default:
+		if kd.DwFlags&protocol.LLKHF_EXTENDED != 0 {
+			if code, ok := input.ExtendedKeyCode(kd.WVk); ok {
+				return code, true
+			}
+		}
 		return input.VKToKeyCodeForLayout(kd.WVk, h.KeyboardLayout)
 	}
 }

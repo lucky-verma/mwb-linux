@@ -104,7 +104,7 @@ func TestFileChannel_ControlHandshakeStillWorks(t *testing.T) {
 	port := freePort(t)
 	stop := make(chan struct{})
 
-	connCh, err := ListenAndAccept(port, testKey, "listener", "127.0.0.1", nil, stop)
+	connCh, err := ListenAndAccept(port, testKey, "listener", "127.0.0.1", nil, nil, stop)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestFileChannel_NilHandlerRejects(t *testing.T) {
 	port := freePort(t)
 	stop := make(chan struct{})
 
-	if _, err := ListenAndAccept(port, testKey, "listener", "127.0.0.1", nil, stop); err != nil {
+	if _, err := ListenAndAccept(port, testKey, "listener", "127.0.0.1", nil, nil, stop); err != nil {
 		t.Fatal(err)
 	}
 	defer close(stop)

@@ -26,7 +26,18 @@ make lint
 
 # Run all checks before committing
 make check
+
+# If you touched gui/: run the settings window tests
+make test-gui
+
+# If you touched packaging (.goreleaser.yaml or packaging/): build and inspect
+# the .deb packages (needs goreleaser)
+make deb
 ```
+
+The README's [Building](README.md#building) section lists every make target,
+and [Building the .deb package](README.md#building-the-deb-package) covers
+test and pre-release packages.
 
 ## Submitting Changes
 
@@ -62,7 +73,8 @@ Start with the [documentation index](docs/README.md). The
 - **Virtual cursor correction** — Wire `UpdateRemoteScreen()` to incoming
   absolute coordinates to fix drift
 - **Multi-monitor** — Proper screen geometry for `xrandr` multi-output setups
-- **GUI** — System tray app with GTK
+- **GUI** — A system tray icon for `mwb-gui` (the settings window exists; see
+  `gui/`)
 - **Auto-discovery** — Find MWB servers on the network
 - **Packaging** — Flatpak, Snap, AUR packages
 

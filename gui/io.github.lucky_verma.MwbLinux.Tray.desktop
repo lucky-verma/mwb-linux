@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mouse Without Borders tray icon
+Comment=Show Mouse Without Borders in the system tray
+Exec=mwb-gui --background
+Icon=input-mouse
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

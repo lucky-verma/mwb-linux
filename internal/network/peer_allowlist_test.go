@@ -125,3 +125,58 @@ func TestSetupConnHandshakeDeadline(t *testing.T) {
 		t.Fatalf("stalled handshake took %v, want less than 1s", elapsed)
 	}
 }
+
+// A waiting Linux peer has no host to match. It accepts the same sources
+// isAllowedPeer already lets attempt the handshake beyond the configured
+// address, and still nothing from loopback or the internet.
+func TestPeerFilterAcceptLocalNetwork(t *testing.T) {
+	allow, ips, err := peerFilter(AcceptLocalNetwork)
+	if err != nil || ips != nil {
+		t.Fatalf("peerFilter(AcceptLocalNetwork) = %v, %v", ips, err)
+	}
+	for remote, want := range map[string]bool{
+		"192.168.1.99:41000":              true,
+		"10.0.0.5:41000":                  true,
+		"172.16.4.2:41000":                true,
+		"[fe80::5054:ff:fe12:3456]:41000": true,
+		"[fd00::1]:41000":                 true,
+		"8.8.8.8:41000":                   false,
+		"[2001:4860:4860::8888]:41000":    false,
+		"127.0.0.1:41000":                 false,
+		"[::1]:41000":                     false,
+	} {
+		addr, err := net.ResolveTCPAddr("tcp", remote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := allow(addr); got != want {
+			t.Errorf("%s: allowed = %v, want %v", remote, got, want)
+		}
+	}
+}
+
+// An empty host keeps failing closed; only the explicit marker opens the LAN.
+func TestPeerFilterEmptyHostStillRejects(t *testing.T) {
+	allow, _, err := peerFilter("")
+	if err == nil {
+		t.Fatal("empty host should report that no peer is configured")
+	}
+	addr, _ := net.ResolveTCPAddr("tcp", "192.168.1.99:41000")
+	if allow(addr) {
+		t.Fatal("empty host must not accept anyone")
+	}
+}
+
+// A configured host behaves exactly as isAllowedPeer did before.
+func TestPeerFilterConfiguredHostUnchanged(t *testing.T) {
+	allow, ips, err := peerFilter("192.168.1.50")
+	if err != nil || len(ips) != 1 {
+		t.Fatalf("peerFilter = %v, %v", ips, err)
+	}
+	for remote, want := range map[string]bool{"192.168.1.50:1": true, "10.0.0.7:1": true, "8.8.8.8:1": false, "127.0.0.1:1": false} {
+		addr, _ := net.ResolveTCPAddr("tcp", remote)
+		if allow(addr) != want || isAllowedPeer(addr, ips) != want {
+			t.Errorf("%s: want %v", remote, want)
+		}
+	}
+}

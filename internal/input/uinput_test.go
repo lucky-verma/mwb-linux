@@ -3,6 +3,8 @@
 package input
 
 import (
+	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -119,5 +121,25 @@ func TestCreateVirtualKeyboard(t *testing.T) {
 	}
 	if err := k.KeyUp(KEY_A); err != nil {
 		t.Errorf("KeyUp: %v", err)
+	}
+}
+
+// A report is laid out as struct input_event, matching what binary.Write
+// produced for inputEvent, and ends with SYN_REPORT.
+func TestEncodeEventsMatchesInputEvent(t *testing.T) {
+	var buf [4 * inputEventSize]byte
+	n := encodeEvents(buf[:], [][3]int32{ev(evAbs, absX, 1234), ev(evAbs, absY, -5)})
+	var want bytes.Buffer
+	for _, e := range []inputEvent{
+		{Type: evAbs, Code: absX, Value: 1234},
+		{Type: evAbs, Code: absY, Value: -5},
+		{Type: evSyn},
+	} {
+		if err := binary.Write(&want, binary.LittleEndian, &e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Equal(buf[:n], want.Bytes()) {
+		t.Fatalf("encoded\n%x\nwant\n%x", buf[:n], want.Bytes())
 	}
 }

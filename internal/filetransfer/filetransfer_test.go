@@ -383,8 +383,8 @@ func TestSend_RoundTripsThroughReceive(t *testing.T) {
 
 func TestSend_RefusesDirectoriesAndOversize(t *testing.T) {
 	dir := t.TempDir()
-	if err := Send(&bytes.Buffer{}, dir, DefaultMaxSize); !errors.Is(err, ErrUnsafeName) {
-		t.Errorf("sending a directory: err = %v, want ErrUnsafeName", err)
+	if err := Send(&bytes.Buffer{}, dir, DefaultMaxSize); !errors.Is(err, ErrFolder) {
+		t.Errorf("sending a directory: err = %v, want ErrFolder", err)
 	}
 
 	big := filepath.Join(dir, "big.bin")
@@ -415,8 +415,8 @@ func TestSendable_MatchesWhatSendAccepts(t *testing.T) {
 		t.Errorf("size = %d, want 300", size)
 	}
 
-	if _, err := Sendable(dir, DefaultMaxSize); !errors.Is(err, ErrUnsafeName) {
-		t.Errorf("directory: err = %v, want ErrUnsafeName", err)
+	if _, err := Sendable(dir, DefaultMaxSize); !errors.Is(err, ErrFolder) {
+		t.Errorf("directory: err = %v, want ErrFolder", err)
 	}
 	if _, err := Sendable(file, 16); !errors.Is(err, ErrSizeRejected) {
 		t.Errorf("over the cap: err = %v, want ErrSizeRejected", err)

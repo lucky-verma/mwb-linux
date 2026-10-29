@@ -89,7 +89,7 @@ func (p *Packet) Marshal() []byte {
 
 	// Payload union: bytes 16-31
 	switch p.Type {
-	case Mouse, NextMachine, HideMouse:
+	case Mouse, NextMachine, HideMouse, LinuxPeerInfo, LinuxGroup, LinuxCursor:
 		binary.LittleEndian.PutUint32(buf[16:20], uint32(p.Mouse.X))
 		binary.LittleEndian.PutUint32(buf[20:24], uint32(p.Mouse.Y))
 		binary.LittleEndian.PutUint32(buf[24:28], uint32(p.Mouse.WheelDelta))
@@ -143,7 +143,7 @@ func UnmarshalPacket(buf []byte) (*Packet, error) {
 	}
 
 	switch p.Type {
-	case Mouse, NextMachine, HideMouse:
+	case Mouse, NextMachine, HideMouse, LinuxPeerInfo, LinuxGroup, LinuxCursor:
 		p.Mouse.X = int32(binary.LittleEndian.Uint32(buf[16:20]))
 		p.Mouse.Y = int32(binary.LittleEndian.Uint32(buf[20:24]))
 		p.Mouse.WheelDelta = int32(binary.LittleEndian.Uint32(buf[24:28]))

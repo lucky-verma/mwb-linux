@@ -102,6 +102,17 @@ func isVirtualDevice(devPath string) bool {
 	if err != nil {
 		return true
 	}
+	return isVirtualSysfsPath(target)
+}
+
+// isVirtualSysfsPath classifies a resolved /sys/class/input entry. uhid nodes
+// sit under /devices/virtual/ too, but they are real hardware: BlueZ exposes
+// Bluetooth LE mice and keyboards (HID over GATT) through uhid. Left ungrabbed,
+// such a mouse keeps moving the local cursor while it also drives the remote.
+func isVirtualSysfsPath(target string) bool {
+	if strings.Contains(target, "/devices/virtual/misc/uhid/") {
+		return false
+	}
 	return strings.Contains(target, "/devices/virtual/")
 }
 

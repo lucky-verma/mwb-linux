@@ -113,8 +113,33 @@ const (
 	KEY_RIGHTMETA  uint16 = 126
 	KEY_COMPOSE    uint16 = 127
 	KEY_102ND      uint16 = 86
-	KEY_MAX        uint16 = 0x2ff
+
+	// Media, browser and launch keys.
+	KEY_STOP         uint16 = 128
+	KEY_CALC         uint16 = 140
+	KEY_SLEEP        uint16 = 142
+	KEY_MAIL         uint16 = 155
+	KEY_BOOKMARKS    uint16 = 156
+	KEY_COMPUTER     uint16 = 157
+	KEY_BACK         uint16 = 158
+	KEY_FORWARD      uint16 = 159
+	KEY_NEXTSONG     uint16 = 163
+	KEY_PLAYPAUSE    uint16 = 164
+	KEY_PREVIOUSSONG uint16 = 165
+	KEY_STOPCD       uint16 = 166
+	KEY_HOMEPAGE     uint16 = 172
+	KEY_REFRESH      uint16 = 173
+	KEY_F13          uint16 = 183 // F13-F24 are consecutive
+	KEY_F24          uint16 = 194
+	KEY_SEARCH       uint16 = 217
+	KEY_MEDIA        uint16 = 226
+
+	KEY_MAX uint16 = 0x2ff
 )
+
+// VK_RETURN is Enter on both the main block and the keypad; Windows marks the
+// keypad one with LLKHF_EXTENDED.
+const vkReturn int32 = 0x0D
 
 const (
 	vkA        int32 = 0x41
@@ -159,6 +184,10 @@ var vkMap = map[int32]uint16{
 	0xA2: KEY_LEFTCTRL, 0xA3: KEY_RIGHTCTRL,
 	0xA4: KEY_LEFTALT, 0xA5: KEY_RIGHTALT,
 	0xAD: KEY_MUTE, 0xAE: KEY_VOLUMEDOWN, 0xAF: KEY_VOLUMEUP,
+	0xB0: KEY_NEXTSONG, 0xB1: KEY_PREVIOUSSONG, 0xB2: KEY_STOPCD, 0xB3: KEY_PLAYPAUSE,
+	0xA6: KEY_BACK, 0xA7: KEY_FORWARD, 0xA8: KEY_REFRESH, 0xA9: KEY_STOP,
+	0xAA: KEY_SEARCH, 0xAB: KEY_BOOKMARKS, 0xAC: KEY_HOMEPAGE, 0x5F: KEY_SLEEP,
+	0xB4: KEY_MAIL, 0xB5: KEY_MEDIA, 0xB6: KEY_COMPUTER, 0xB7: KEY_CALC,
 	vkOEM1: KEY_SEMICOLON, vkOEMPlus: KEY_EQUAL, vkOEMComma: KEY_COMMA,
 	vkOEMMinus: KEY_MINUS, vkOEMDot: KEY_DOT, vkOEM2: KEY_SLASH,
 	vkOEM3: KEY_GRAVE, vkOEM4: KEY_LEFTBRACE, vkOEM5: KEY_BACKSLASH,
@@ -263,6 +292,10 @@ func init() {
 	for vk := int32(0x30); vk <= 0x39; vk++ {
 		vkMap[vk] = digits[vk-0x30]
 	}
+	// F13-F24: VK 0x7C-0x87
+	for i := int32(0); i <= int32(KEY_F24-KEY_F13); i++ {
+		vkMap[0x7C+i] = KEY_F13 + uint16(i)
+	}
 }
 
 // VKToKeyCode maps a Windows Virtual Key code to a platform-specific key code.
@@ -290,13 +323,14 @@ func normalizedLayoutOverrides(layout string) (map[int32]uint16, bool) {
 
 // usedKeyCodes returns a deduplicated sorted list of all Linux evdev key codes
 // referenced by vkMap. Used by CreateVirtualKeyboard to register only the bits
-// it needs — avoids 640+ unnecessary UI_SET_KEYBIT ioctl calls (KEY_MAX=767
-// vs actual max used code of ~127).
+// it needs — avoids hundreds of unnecessary UI_SET_KEYBIT ioctl calls
+// (KEY_MAX=767 vs actual max used code of ~226).
 func usedKeyCodes() []uint16 {
-	seen := make(map[uint16]struct{}, len(vkMap))
+	seen := make(map[uint16]struct{}, len(vkMap)+1)
 	for _, code := range vkMap {
 		seen[code] = struct{}{}
 	}
+	seen[KEY_KPENTER] = struct{}{} // reached through ExtendedKeyCode
 	codes := make([]uint16, 0, len(seen))
 	for code := range seen {
 		codes = append(codes, code)

@@ -171,8 +171,8 @@ func TestFileSender_RejectsDirectoryBeforeDialing(t *testing.T) {
 		MachineID: 42, DialTimeout: time.Second,
 	}
 	err := sender.Send([]string{t.TempDir()})
-	if !errors.Is(err, filetransfer.ErrUnsafeName) {
-		t.Fatalf("err = %v, want ErrUnsafeName before any dial", err)
+	if !errors.Is(err, filetransfer.ErrFolder) {
+		t.Fatalf("err = %v, want ErrFolder before any dial", err)
 	}
 }
 

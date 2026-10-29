@@ -5,9 +5,14 @@ package capture
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/lucky-verma/mwb-linux/internal/input"
+	"github.com/lucky-verma/mwb-linux/internal/protocol"
 )
 
 type blockingPointer struct {
@@ -30,6 +35,8 @@ func (p *blockingPointer) Close() {
 }
 
 func TestRunUsesPersistentPointerAndStopClosesIt(t *testing.T) {
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("XDG_SESSION_TYPE", "x11")
 	pointer := &blockingPointer{started: make(chan struct{}), closed: make(chan struct{})}
 	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
 	c.pointer = pointer
@@ -324,19 +331,19 @@ func TestRemoteLandingMatchesTrackedPositionAndRejectsBounce(t *testing.T) {
 	for _, width := range []int32{1920, 2560, 3840} {
 		for _, edge := range []string{"left", "right"} {
 			c := New(nil, ScreenInfo{Width: width, Height: 1080}, edge)
-			c.remoteW = width
-			pixel, wire := c.remoteEntryLocked()
+			c.remoteW, c.remoteH = width, 1080
+			xWire, _ := c.remoteEntryLocked(32767) // along the edge: middle
 			want := int32((int64(width)*5243 + 32767) / 65535)
 			if edge == "left" {
 				want = width - want
 			}
-			if pixel != want {
-				t.Fatalf("landing=%d want %d", pixel, want)
+			if c.remoteX != want {
+				t.Fatalf("landing=%d want %d", c.remoteX, want)
 			}
-			if wire != int32(int64(pixel)*65535/int64(width)) {
+			if xWire != int32(int64(c.remoteX)*65535/int64(width)) {
 				t.Fatal("wire and tracked positions disagree")
 			}
-			c.active, c.remoteX = false, pixel
+			c.active, c.remoteX = false, want
 			if c.AcceptsActivation() {
 				t.Fatal("accepted a bounce at entry")
 			}
@@ -377,5 +384,236 @@ func TestReturnKeepsHeightAndRecentersBeforeRelease(t *testing.T) {
 	c.SetActive(true)
 	if pointer.x != entryClearance || pointer.y != 360 || grabbed() != 0 || c.canSwitch {
 		t.Fatalf("incorrect return: position=%d,%d grabbed=%d canSwitch=%v", pointer.x, pointer.y, grabbed(), c.canSwitch)
+	}
+}
+
+type sentPackets struct {
+	mu    sync.Mutex
+	types []protocol.PackageType
+}
+
+func (s *sentPackets) send(p *protocol.Packet) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.types = append(s.types, p.Type)
+	return nil
+}
+
+func (s *sentPackets) count(t protocol.PackageType) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, got := range s.types {
+		if got == t {
+			n++
+		}
+	}
+	return n
+}
+
+// The PowerToys path must send exactly what it always has: no ownership packets.
+func TestNotifyPeerIsSilentForWindowsPeer(t *testing.T) {
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	sent := &sentPackets{}
+	c.sendFn = sent.send
+	c.notifyPeer(protocol.MachineSwitched)
+	c.notifyPeer(protocol.HideMouse)
+	if len(sent.types) != 0 {
+		t.Fatalf("sent %v to a Windows peer", sent.types)
+	}
+}
+
+func TestVirtualEdgeReturnTellsLinuxPeer(t *testing.T) {
+	c, grabbed := newFakeIsolated(t, 1)
+	c.screen = ScreenInfo{Width: 1920, Height: 1080}
+	c.edgeSide, c.remoteW, c.remoteH = "left", 1920, 1080
+	c.accelMult = 1
+	sent := &sentPackets{}
+	c.sendFn = sent.send
+	c.SetLinuxPeer(true)
+	c.applyIsolation()
+
+	// Cursor is on the peer near its right edge (the shared one for "left").
+	c.remoteX, c.remoteY, c.canReturn = 1919, 540, true
+	c.handleRel(inputEvent{Sec: 1, Type: evRel, Code: relX, Value: 5})
+	c.handleEvent(inputEvent{Sec: 1, Type: evSyn, Code: synReport}) // the report ends
+
+	if !c.IsActive() || grabbed() != 0 {
+		t.Fatal("virtual edge return did not restore local input")
+	}
+	if sent.count(protocol.HideMouse) != 1 {
+		t.Fatalf("sent %v, want one HideMouse", sent.types)
+	}
+}
+
+func TestHotkeyReturnTellsLinuxPeer(t *testing.T) {
+	c, _ := newFakeIsolated(t, 1)
+	c.screen = ScreenInfo{Width: 1920, Height: 1080}
+	c.edgeSide, c.remoteW, c.remoteH = "right", 1920, 1080
+	sent := &sentPackets{}
+	c.sendFn = sent.send
+	c.SetLinuxPeer(true)
+	c.applyIsolation() // inactive: cursor is on the peer
+
+	// Ctrl and Alt held. Pressing them through handleKey would forward them
+	// to the peer over the (absent) connection, so set the tracked state.
+	c.hotkeyCtrl, c.hotkeyAlt = true, true
+	c.handleKey(inputEvent{Type: evKey, Code: 106, Value: 1}) // Right
+	if !c.IsActive() || sent.count(protocol.HideMouse) != 1 {
+		t.Fatalf("active=%v sent=%v; want local control and one HideMouse", c.IsActive(), sent.types)
+	}
+	// Already local: a second hotkey press must not repeat the notification.
+	c.handleKey(inputEvent{Type: evKey, Code: 106, Value: 1})
+	if sent.count(protocol.HideMouse) != 1 {
+		t.Fatalf("sent %v, want exactly one HideMouse", sent.types)
+	}
+}
+
+func TestYieldToPeerIsolatesAndForwards(t *testing.T) {
+	c, grabbed := newFakeIsolated(t, 2)
+	c.active = true
+	c.screen = ScreenInfo{Width: 2560, Height: 1440}
+	c.edgeSide, c.remoteW, c.remoteH = "right", 1920, 1080
+	c.pointer = &recordingPointer{x: 2000, y: 720}
+
+	c.YieldToPeer()
+
+	if c.IsActive() {
+		t.Fatal("still active after the peer took the cursor")
+	}
+	if grabbed() != 2 {
+		t.Fatalf("grabbed %d of 2 devices; local input would leak", grabbed())
+	}
+	wantX := remoteEntryInset(c.remoteW) // a right edge lands near the remote's left
+	if c.remoteX != wantX || abs32(c.remoteY-540) > 1 || c.canReturn {
+		t.Fatalf("virtual cursor at %d,%d canReturn=%v; want landing %d,~540 with return gated",
+			c.remoteX, c.remoteY, c.canReturn, wantX)
+	}
+	// A second HideMouse while already remote is a no-op.
+	c.YieldToPeer()
+	if grabbed() != 2 || c.IsActive() {
+		t.Fatal("repeated yield changed state")
+	}
+}
+
+// After Stop the capturer must never re-grab devices.
+func TestYieldToPeerAfterStopDoesNothing(t *testing.T) {
+	c, grabbed := newFakeIsolated(t, 1)
+	c.active = true
+	c.screen = ScreenInfo{Width: 1920, Height: 1080}
+	c.remoteW, c.remoteH = 1920, 1080
+	c.mu.Lock()
+	c.stopped = true
+	c.mu.Unlock()
+	c.YieldToPeer()
+	if !c.IsActive() || grabbed() != 0 {
+		t.Fatal("yield after Stop changed state")
+	}
+}
+
+// Side buttons, under either evdev name, and the tilt wheel reach the
+// other machine as MWB sends them: X buttons carry 1 or 2 in the mouse data.
+func TestSideButtonsAndTiltWheelAreForwarded(t *testing.T) {
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.active, c.remoteW, c.remoteH = false, 1920, 1080
+	var got []protocol.MouseData
+	c.sendFn = func(p *protocol.Packet) error { got = append(got, p.Mouse); return nil }
+
+	for _, code := range []uint16{input.BTN_SIDE, btnBack, input.BTN_EXTRA, btnForward} {
+		c.handleKey(inputEvent{Type: evKey, Code: code, Value: 1})
+		c.handleKey(inputEvent{Type: evKey, Code: code, Value: 0})
+	}
+	c.handleRel(inputEvent{Type: evRel, Code: relHWheel, Value: -1})
+
+	want := []struct{ flags, data int32 }{
+		{protocol.WM_XBUTTONDOWN, 1}, {protocol.WM_XBUTTONUP, 1},
+		{protocol.WM_XBUTTONDOWN, 1}, {protocol.WM_XBUTTONUP, 1},
+		{protocol.WM_XBUTTONDOWN, 2}, {protocol.WM_XBUTTONUP, 2},
+		{protocol.WM_XBUTTONDOWN, 2}, {protocol.WM_XBUTTONUP, 2},
+		{protocol.WM_MOUSEHWHEEL, -120},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("sent %d mouse packets, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].DwFlags != w.flags || got[i].WheelDelta != w.data {
+			t.Errorf("packet %d: flags %#x data %d, want %#x %d", i, got[i].DwFlags, got[i].WheelDelta, w.flags, w.data)
+		}
+	}
+}
+
+// A device that goes away and comes back under the same /dev/input path, as a
+// Bluetooth mouse does after the screen sleeps, is opened again on the next
+// rescan instead of being kept as a closed file.
+func TestDeviceReturningUnderSamePathIsReopened(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event24")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connect := func() *os.File { // a writer keeps the reader from seeing EOF
+		w, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.findDevicesFn = func() ([]string, error) { return []string{path}, nil }
+	defer c.Stop()
+	tracked := func() *os.File {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if d := c.devices[path]; d != nil {
+			return d.file
+		}
+		return nil
+	}
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(2 * time.Second); !ok(); {
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	w := connect()
+	c.refreshDevices()
+	first := tracked()
+	if first == nil {
+		t.Fatal("device not tracked")
+	}
+	_ = w.Close() // the device goes away
+	waitFor("a vanished device stayed tracked", func() bool { return tracked() == nil })
+
+	w = connect() // and comes back at the same path
+	defer func() { _ = w.Close() }()
+	c.refreshDevices()
+	if f := tracked(); f == nil || f == first {
+		t.Fatal("the returning device was not opened again")
+	}
+}
+
+// One mouse report moving on both axes becomes one move, sent when the
+// report ends, not one move per axis.
+func TestMouseReportIsOneMove(t *testing.T) {
+	c := New(nil, ScreenInfo{Width: 1920, Height: 1080}, "left")
+	c.active, c.remoteW, c.remoteH, c.accelMult = false, 1920, 1080, 1
+	c.remoteX, c.remoteY = 500, 500
+	var moves []protocol.MouseData
+	c.sendFn = func(p *protocol.Packet) error { moves = append(moves, p.Mouse); return nil }
+
+	c.handleEvent(inputEvent{Sec: 1, Type: evRel, Code: relX, Value: 3})
+	c.handleEvent(inputEvent{Sec: 1, Type: evRel, Code: relY, Value: 4})
+	if len(moves) != 0 {
+		t.Fatalf("sent %d moves before the report ended", len(moves))
+	}
+	c.handleEvent(inputEvent{Type: evSyn, Code: synReport})
+	if len(moves) != 1 {
+		t.Fatalf("one report sent %d moves, want 1", len(moves))
+	}
+	if c.remoteX != 503 || c.remoteY != 504 {
+		t.Fatalf("cursor at %d,%d, want 503,504", c.remoteX, c.remoteY)
 	}
 }

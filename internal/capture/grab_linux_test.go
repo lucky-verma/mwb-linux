@@ -250,6 +250,22 @@ func TestIsGrabTarget_NeverGrabsVirtualDevices(t *testing.T) {
 	t.Logf("verified %d virtual devices are excluded", checked)
 }
 
+func TestIsVirtualSysfsPath(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/sys/devices/virtual/input/input73/event23", true},                                // uinput (mwb-mouse)
+		{"/sys/devices/virtual/misc/uhid/0005:1235:AA22.0008/input/input46/event21", false}, // Bluetooth LE mouse
+		{"/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/0003:046D:C52B.0001/input/input5/event5", false},
+		{"/sys/devices/platform/i8042/serio0/input/input2/event2", false},
+	} {
+		if got := isVirtualSysfsPath(tc.path); got != tc.want {
+			t.Errorf("isVirtualSysfsPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestIsVirtualDevice_UnknownPathIsTreatedAsVirtual(t *testing.T) {
 	// Failing closed matters: an unreadable node must not be grabbed on a guess.
 	if !isVirtualDevice("/dev/input/event-does-not-exist") {

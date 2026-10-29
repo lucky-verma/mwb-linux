@@ -18,7 +18,27 @@ type Config struct {
 	RemoteWidth  int    `toml:"remote_width"`
 	RemoteHeight int    `toml:"remote_height"`
 	Edge         string `toml:"edge"`
-	Clipboard    *bool  `toml:"clipboard"` // nil = unset, treated as enabled
+	// EdgeChanged is when edge was last chosen, in Unix seconds; 0 = unknown.
+	// mwb-gui sets it, and mwb sets it when it adopts a Linux peer's choice.
+	EdgeChanged int64 `toml:"edge_changed"`
+	Clipboard   *bool `toml:"clipboard"` // nil = unset, treated as enabled
+
+	// Layout is the left-to-right order of the screens in a group of
+	// mwb-linux machines, by machine name; it replaces edge for peer =
+	// "linux". mwb keeps it in step across the group: the most recent change
+	// wins, and LayoutChanged (Unix seconds, 0 = unknown) is when it was made.
+	Layout        []string `toml:"layout"`
+	LayoutChanged int64    `toml:"layout_changed"`
+	// Grid is the two-dimensional arrangement, each entry "name:col:row". Empty
+	// means the arrangement is the single row in Layout. Layout is always kept
+	// as the row projection, so an older build still reads a sensible order.
+	Grid []string `toml:"grid"`
+
+	// Interface names the network interface mwb uses, such as "wlp4s0":
+	// it listens only on that interface's address and connects out from it.
+	// Empty means every interface. A name rather than an address, so a new
+	// DHCP lease does not break it.
+	Interface string `toml:"interface"`
 
 	// FileTransfer controls the MWB file copy channel. nil = enabled.
 	FileTransfer *bool `toml:"file_transfer"`
@@ -54,15 +74,32 @@ type Config struct {
 	// absolute-mirror direction). 1.0 mirrors Windows 1:1; raise it for a faster
 	// local cursor when Windows is in control. <= 0 means unset (defaults to 1).
 	InboundMultiplier float64 `toml:"inbound_multiplier"`
+
+	// Peer names what runs on the other machine. "windows" (the default) is
+	// PowerToys Mouse Without Borders and keeps the original behavior exactly.
+	// "linux" is another mwb-linux instance: it enables deterministic
+	// connection pairing and explicit cursor-ownership packets, which PowerToys
+	// otherwise provides itself. Only set it when both ends run mwb-linux.
+	Peer string `toml:"peer"`
+
+	// Bidirectional sends local input to the peer when the cursor crosses the
+	// configured edge, like the -bidi flag. nil = off for a PowerToys peer, so
+	// the installed service stays receive-only unless asked, and on for a
+	// Linux peer, because two receive-only machines can never move the cursor
+	// at all. An explicit -bidi flag overrides it.
+	Bidirectional *bool `toml:"bidirectional"`
 }
+
+// Peer types accepted by the peer setting.
+const (
+	PeerWindows = "windows"
+	PeerLinux   = "linux"
+)
 
 func Load(path string) (*Config, error) {
 	var cfg Config
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
-	}
-	if cfg.Host == "" {
-		return nil, fmt.Errorf("config: host is required")
 	}
 	if cfg.Key == "" {
 		return nil, fmt.Errorf("config: key is required")
@@ -97,6 +134,19 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Edge == "" {
 		cfg.Edge = "left"
+	}
+	switch cfg.Peer {
+	case "":
+		cfg.Peer = PeerWindows
+	case PeerWindows, PeerLinux:
+	default:
+		// Fail closed: a typo must not silently pick a pairing strategy.
+		return nil, fmt.Errorf("config: peer must be %q or %q, got %q", PeerWindows, PeerLinux, cfg.Peer)
+	}
+	// A Linux peer may leave host empty and wait for the other machine to
+	// connect (see WaitsForPeer). A PowerToys peer always needs it, as before.
+	if cfg.Host == "" && cfg.Peer != PeerLinux {
+		return nil, fmt.Errorf("config: host is required")
 	}
 
 	// The config holds the plaintext security key — the only secret protecting
@@ -162,6 +212,29 @@ func (c *Config) FileTransferEnabled() bool {
 // stock, up-to-date Windows peer speaks.
 func (c *Config) LegacyCryptoEnabled() bool {
 	return c.LegacyCrypto != nil && *c.LegacyCrypto
+}
+
+// LinuxPeer reports whether the other machine runs mwb-linux rather than
+// PowerToys.
+func (c *Config) LinuxPeer() bool {
+	return c.Peer == PeerLinux
+}
+
+// BidirectionalEnabled reports whether config asks for bidirectional input.
+// An absent setting means receive-only for a PowerToys peer, preserving the
+// prior default, and two-way for a Linux peer, as PowerToys pairs behave.
+func (c *Config) BidirectionalEnabled() bool {
+	if c.Bidirectional == nil {
+		return c.LinuxPeer()
+	}
+	return *c.Bidirectional
+}
+
+// WaitsForPeer reports whether this machine only accepts a connection from
+// the other one instead of dialing it: a Linux peer with no host set. The
+// other machine dials this one's address, as when pairing PowerToys machines.
+func (c *Config) WaitsForPeer() bool {
+	return c.LinuxPeer() && c.Host == ""
 }
 
 // FileDirectory resolves the legacy direct-download directory.

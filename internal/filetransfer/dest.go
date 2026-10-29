@@ -12,6 +12,10 @@ import (
 // safe to create inside the destination directory.
 var ErrUnsafeName = errors.New("unsafe file name")
 
+// ErrFolder rejects a copied folder: MWB moves one file at a time, and its
+// documented workaround is to copy a zip of the folder instead.
+var ErrFolder = errors.New("folders can't be copied; copy a zip of the folder, or the files inside it")
+
 // SafeName reduces a peer-supplied name to a plain basename that cannot escape
 // the destination directory.
 //

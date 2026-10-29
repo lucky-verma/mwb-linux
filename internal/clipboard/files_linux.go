@@ -3,10 +3,7 @@
 package clipboard
 
 import (
-	"context"
 	"net/url"
-	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -26,11 +23,7 @@ const (
 // the text path: sending the filename as text instead of the file is the wrong
 // behaviour and is what happens without this.
 func (m *Manager) getLocalFileClipboard() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	defer cancel()
-	targetCmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-	targetCmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	targets, err := targetCmd.Output()
+	targets, err := m.readClipboard("TARGETS")
 	if err != nil {
 		return nil
 	}
@@ -38,12 +31,7 @@ func (m *Manager) getLocalFileClipboard() []string {
 	if target == "" {
 		return nil
 	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-	defer cancel2()
-	readCmd := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", target, "-o")
-	readCmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	out, err := readCmd.Output()
+	out, err := m.readClipboard(target)
 	if err != nil {
 		return nil
 	}
@@ -55,6 +43,9 @@ func clipboardFileTarget(targets string) string {
 	// Nautilus consumes for Ctrl+V. Prefer it when both are offered.
 	if strings.Contains(targets, gnomeFileTarget) {
 		return gnomeFileTarget
+	}
+	if strings.Contains(targets, mateFileTarget) {
+		return mateFileTarget // Caja
 	}
 	if strings.Contains(targets, uriListTarget) {
 		return uriListTarget
