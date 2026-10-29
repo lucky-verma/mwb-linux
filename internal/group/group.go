@@ -419,9 +419,13 @@ func (g *Group) session(l *link, conn *network.Conn, outbound bool) {
 	g.mu.Lock()
 	l.conn, l.info, l.since = conn, false, time.Now()
 	learned := false
-	if l.addr == "" && !outbound {
-		// It reached us; that address reaches it too.
-		l.addr = conn.RemoteHost()
+	// Keep the address this link redials fresh. It may hold a stale address
+	// from members.json — the network moved and the peer's IP changed — while
+	// the connection that just succeeded names the peer's current address,
+	// whichever side dialed. Adopt it, so that when this link drops it redials
+	// an address that still reaches the peer instead of the old one forever.
+	if host := conn.RemoteHost(); host != "" && host != l.addr {
+		l.addr = host
 		learned = true
 	}
 	// A forgotten machine that connects here in person is back: presence is
@@ -490,7 +494,12 @@ func (g *Group) session(l *link, conn *network.Conn, outbound bool) {
 func (g *Group) bootstrap() {
 	for !g.stopped() {
 		g.mu.Lock()
-		found := g.bootName != "" && g.links[g.bootName] != nil
+		// "found" means the bootstrap member is connected now, not merely that a
+		// link object exists for it. If it exists but is offline, keep dialing
+		// the configured address: that address is the one the user set and is
+		// current, so it recovers the connection even when the link is sitting
+		// on a stale learned address.
+		found := g.bootName != "" && g.links[g.bootName] != nil && g.links[g.bootName].conn != nil
 		if !found {
 			// A remembered member at this address is dialed by its own
 			// link; a second dial would only race it. If the address has

@@ -396,3 +396,54 @@ func TestThreeMachinesJoinThroughOneAndShareTheCursor(t *testing.T) {
 		t.Fatal("the cursor's location should be unknown once its machine left")
 	}
 }
+
+// TestLinkReconnectsAfterItsStoredAddressGoesStale reproduces the failure where
+// a machine would not rejoin after a drop until it was manually restarted: its
+// link held a stale address (the network had moved and the peer's IP changed),
+// so the link redialed that dead address forever while bootstrap deferred to
+// it. A successful connection now refreshes the link's redial address, and
+// bootstrap resumes dialing the configured address whenever the member is
+// offline, so recovery no longer needs a restart.
+func TestLinkReconnectsAfterItsStoredAddressGoesStale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("opens real connections")
+	}
+	pa, pb := freePort(t), freePort(t)
+	a := startMachine(t, "alpha", pa, "")
+	defer close(a.stop)
+	addrA := "127.0.0.1:" + strconv.Itoa(pa)
+	b := startMachine(t, "bravo", pb, addrA)
+	defer close(b.stop)
+
+	waitFor(t, "bravo connected to alpha", func() bool { return onlineCount(b.g) == 1 })
+
+	// The network moves: poison the learned address with an unroutable one and
+	// drop the link, as a changed IP would. The link now holds a stale address
+	// that no longer reaches alpha — the exact state that used to wedge it.
+	b.g.mu.Lock()
+	l := b.g.links["alpha"]
+	l.addr = "203.0.113.1" // TEST-NET-3: guaranteed unroutable
+	c := l.conn
+	b.g.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
+
+	// Recovery must not depend on the stale address: bootstrap re-dials the
+	// configured one.
+	waitFor(t, "bravo sees the drop", func() bool { return onlineCount(b.g) == 0 })
+	waitFor(t, "bravo reconnects to alpha without a restart", func() bool { return onlineCount(b.g) == 1 })
+
+	// And the successful reconnection refreshed the redial address off the
+	// stale value, so a further drop would dial somewhere that still works.
+	b.g.mu.Lock()
+	addr := b.g.links["alpha"].addr
+	b.g.mu.Unlock()
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if host != "127.0.0.1" {
+		t.Fatalf("after reconnecting, link address = %q; a successful connection must refresh the stale address", addr)
+	}
+}
