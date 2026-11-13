@@ -32,9 +32,16 @@ type Conn struct {
 	RemoteID   uint32
 	LocalName  string
 	RemoteName string
-	nextID     atomic.Int32
 	sendMu     sync.Mutex // guards enc.Write — CBC mode is not goroutine-safe
 }
+
+// PowerToys pairs sockets by machine ID and deduplicates packets across sockets.
+// Neither identity nor the packet sequence may restart for each connection.
+var (
+	machineIDMu sync.Mutex
+	machineIDs  = make(map[string]uint32)
+	nextID      atomic.Int32
+)
 
 // Cached key material — PBKDF2 is expensive (50k iterations), only derive once.
 var (
@@ -171,11 +178,18 @@ func newSecureStream(raw net.Conn, securityKey, machineName string, timeout time
 		return nil, fmt.Errorf("read IV block: %w", err)
 	}
 
-	// Generate a machine ID from random data
+	// Keep the same identity across inbound/outbound races and reconnects.
 	machineID := uint32(ranData[0])<<24 | uint32(ranData[1])<<16 | uint32(ranData[2])<<8 | uint32(ranData[3])
 	if machineID == 0 || machineID == 255 {
 		machineID = 1
 	}
+	machineIDMu.Lock()
+	if id, ok := machineIDs[machineName]; ok {
+		machineID = id
+	} else {
+		machineIDs[machineName] = machineID
+	}
+	machineIDMu.Unlock()
 
 	c := &Conn{
 		raw:       raw,
@@ -266,6 +280,11 @@ func connectWithRetry(
 		defer close(connCh)
 
 		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			conn, err := connect()
 			if err == nil {
 				select {
@@ -625,11 +644,18 @@ func (c *Conn) Writer() io.Writer { return c.enc }
 // sendMu serializes all writes: cipher.CBCEncrypter mutates internal IV state
 // on every call and is not safe for concurrent use.
 func (c *Conn) SendPacket(p *protocol.Packet) error {
-	// Wrap before reaching 0x7FFFFFFF — protocol requires non-zero, non-negative IDs.
-	if c.nextID.Load() >= 0x7FFFFF00 {
-		c.nextID.Store(0)
+	// Wrap before reaching 0x7FFFFFFF without racing another socket's sender.
+	for {
+		prev := nextID.Load()
+		id := prev + 1
+		if id >= 0x7FFFFF00 {
+			id = 1
+		}
+		if nextID.CompareAndSwap(prev, id) {
+			p.ID = id
+			break
+		}
 	}
-	p.ID = c.nextID.Add(1)
 	buf := p.Marshal()
 	protocol.StampPacket(buf, c.magic)
 	c.sendMu.Lock()
@@ -710,14 +736,9 @@ func (c *Conn) RecvPacket() (*protocol.Packet, error) {
 	return protocol.UnmarshalPacket(buf)
 }
 
-// Close sends a ByeBye packet (like OG MWB) then closes the connection.
+// Close closes this socket, not the machine's other authenticated connections.
+// A ByeBye here would make a losing dial unregister the winning connection.
 func (c *Conn) Close() error {
-	bye := &protocol.Packet{
-		Type: protocol.ByeBye,
-		Src:  c.MachineID,
-		Des:  protocol.IDAll,
-	}
-	_ = c.SendPacket(bye) // best-effort, don't block on failure
 	return c.raw.Close()
 }
 

@@ -318,7 +318,7 @@ func main() {
 			activeMachineID.CompareAndSwap(conn.MachineID, 0)
 
 			_ = conn.Close()
-			slog.Info("disconnected, will reconnect in 100ms")
+			slog.Info("disconnected, reconnecting")
 		}
 	}()
 

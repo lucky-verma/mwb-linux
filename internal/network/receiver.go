@@ -3,6 +3,7 @@ package network
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"time"
@@ -35,7 +36,12 @@ func startHeartbeat(conn *Conn, stop chan struct{}) {
 }
 
 // ReceiveLoop reads packets from the connection and dispatches them.
-func ReceiveLoop(conn *Conn, handler *Handler) error {
+func ReceiveLoop(conn *Conn, handler *Handler) (err error) {
+	defer func() {
+		if releaseErr := handler.ResetInput(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("release input on disconnect: %w", releaseErr))
+		}
+	}()
 	stop := make(chan struct{})
 	go startHeartbeat(conn, stop)
 	defer close(stop)
