@@ -2,12 +2,11 @@
 package protocol
 
 import (
+	"crypto/pbkdf2"
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
 	"fmt"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 const (
@@ -29,7 +28,20 @@ func pbkdf2Salt() []byte {
 
 // DeriveKey derives a 32-byte AES-256 key using PBKDF2-SHA512 with 50,000 iterations.
 func DeriveKey(securityKey string) []byte {
-	return pbkdf2.Key([]byte(securityKey), pbkdf2Salt(), pbkdf2Iter, aesKeySize, sha512.New)
+	return pbkdf2SHA512(securityKey, pbkdf2Salt(), pbkdf2Iter)
+}
+
+// pbkdf2SHA512 derives an AES-256 key with the standard library's PBKDF2.
+// pbkdf2.Key fails only for a non-positive key length or, in FIPS 140-only
+// mode, for keys under 112 bits, salts under 128 bits or non-SHA-2/3 hashes.
+// Every caller passes a 32-byte key length, SHA-512 and a salt of at least
+// SaltSize bytes, so an error here is a programming error.
+func pbkdf2SHA512(password string, salt []byte, iter int) []byte {
+	key, err := pbkdf2.Key(sha512.New, password, salt, iter, aesKeySize)
+	if err != nil {
+		panic("protocol: PBKDF2 rejected fixed parameters: " + err.Error())
+	}
+	return key
 }
 
 // FixedIV returns the 16-byte IV for AES-CBC (ASCII "1844674407370955").
@@ -122,5 +134,5 @@ const (
 // DeriveKeyWithSalt derives a 32-byte AES-256 key from the security key and a
 // per-connection salt, mirroring PowerToys' Encryption.GenLegalKey(salt).
 func DeriveKeyWithSalt(securityKey string, salt []byte) []byte {
-	return pbkdf2.Key([]byte(securityKey), salt, pbkdf2IterV2, aesKeySize, sha512.New)
+	return pbkdf2SHA512(securityKey, salt, pbkdf2IterV2)
 }
