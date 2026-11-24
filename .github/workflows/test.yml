@@ -46,4 +46,6 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.1
+          # Must read the export data of the Go that "stable" installs:
+          # v2.13.1 fails every package at typecheck on Go 1.27.3+.
+          version: v2.15.0
