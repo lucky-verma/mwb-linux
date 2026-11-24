@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-24
+
+### Fixed
+- Release keys and mouse buttons still held when Windows moves the cursor
+  away or the connection drops, so a lost key-up (for example Win+L locking
+  Windows) no longer leaves Super or another key stuck on Linux.
+- Keep one machine ID and packet ID sequence across reconnects. PowerToys
+  drops packets whose IDs it saw recently on any socket, so after a quick
+  reconnect it could discard the registration heartbeat and refuse to move the
+  cursor to Linux until mwb restarted.
+- A "magic mismatch" now logs a hint naming the security key and
+  `legacy_crypto`, the two settings that cause it.
+- Log "local" instead of "Ubuntu" when control returns to Linux.
+
+### Changed
+- PBKDF2 comes from the Go standard library; `golang.org/x/crypto` is no
+  longer a dependency.
+
 ## [0.6.3] - 2026-09-15
 
 ### Compatibility
@@ -413,7 +431,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.6.0...v0.6.1
