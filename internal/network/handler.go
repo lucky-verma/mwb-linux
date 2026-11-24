@@ -2,6 +2,8 @@
 package network
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -55,6 +57,8 @@ type Handler struct {
 	pendingCtrl     bool
 	pendingCtrlCode uint16
 	suppressCtrlUp  bool
+	heldKeys        map[uint16]struct{}
+	heldButtons     map[uint16]struct{}
 	// inbound cursor tracking (single-goroutine receive loop, no lock needed)
 	inX, inY         int32 // current injected absolute position (0-65535)
 	lastInX, lastInY int32 // last absolute position reported by the remote
@@ -63,7 +67,7 @@ type Handler struct {
 
 // HandlePacket dispatches a packet to the appropriate handler.
 func (h *Handler) HandlePacket(pkt *protocol.Packet) {
-	if pkt.Type != protocol.Keyboard {
+	if pkt.Type != protocol.Keyboard && pkt.Type != protocol.HideMouse {
 		if err := h.flushPendingCtrl(); err != nil {
 			slog.Error("keyboard input error", "err", err)
 		}
@@ -90,6 +94,9 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		}
 	case protocol.HideMouse:
 		slog.Debug("HideMouse received — cursor leaving us", "src", pkt.Src)
+		if err := h.ResetInput(); err != nil {
+			slog.Error("release input on cursor departure", "err", err)
+		}
 	case protocol.NextMachine:
 		if h.ShouldReclaim != nil && !h.ShouldReclaim(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta) {
 			slog.Debug("NextMachine ignored — requested landing point is not on our shared edge",
@@ -126,27 +133,27 @@ func (h *Handler) handleMouse(pkt *protocol.Packet) {
 		err = h.moveInbound(md.X, md.Y)
 	case protocol.WM_LBUTTONDOWN:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
-			err = h.Mouse.ButtonDown(input.BTN_LEFT)
+			err = h.buttonDown(input.BTN_LEFT)
 		}
 	case protocol.WM_LBUTTONUP:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
-			err = h.Mouse.ButtonUp(input.BTN_LEFT)
+			err = h.buttonUp(input.BTN_LEFT)
 		}
 	case protocol.WM_RBUTTONDOWN:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
-			err = h.Mouse.ButtonDown(input.BTN_RIGHT)
+			err = h.buttonDown(input.BTN_RIGHT)
 		}
 	case protocol.WM_RBUTTONUP:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
-			err = h.Mouse.ButtonUp(input.BTN_RIGHT)
+			err = h.buttonUp(input.BTN_RIGHT)
 		}
 	case protocol.WM_MBUTTONDOWN:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
-			err = h.Mouse.ButtonDown(input.BTN_MIDDLE)
+			err = h.buttonDown(input.BTN_MIDDLE)
 		}
 	case protocol.WM_MBUTTONUP:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
-			err = h.Mouse.ButtonUp(input.BTN_MIDDLE)
+			err = h.buttonUp(input.BTN_MIDDLE)
 		}
 	case protocol.WM_XBUTTONDOWN:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
@@ -155,7 +162,7 @@ func (h *Handler) handleMouse(pkt *protocol.Packet) {
 			if md.WheelDelta == 2 {
 				btn = input.BTN_EXTRA
 			}
-			err = h.Mouse.ButtonDown(btn)
+			err = h.buttonDown(btn)
 		}
 	case protocol.WM_XBUTTONUP:
 		if err = h.moveInbound(md.X, md.Y); err == nil {
@@ -163,7 +170,7 @@ func (h *Handler) handleMouse(pkt *protocol.Packet) {
 			if md.WheelDelta == 2 {
 				btn = input.BTN_EXTRA
 			}
-			err = h.Mouse.ButtonUp(btn)
+			err = h.buttonUp(btn)
 		}
 	case protocol.WM_MOUSEWHEEL:
 		delta := md.WheelDelta / 120
@@ -254,9 +261,9 @@ func (h *Handler) handleKeyboard(pkt *protocol.Packet) {
 	}
 	var err error
 	if isUp {
-		err = h.Keyboard.KeyUp(keyCode)
+		err = h.keyUp(keyCode)
 	} else {
-		err = h.Keyboard.KeyDown(keyCode)
+		err = h.keyDown(keyCode)
 	}
 	if err != nil {
 		slog.Error("keyboard input error", "err", err)
@@ -268,7 +275,64 @@ func (h *Handler) flushPendingCtrl() error {
 		return nil
 	}
 	h.pendingCtrl = false
-	return h.Keyboard.KeyDown(h.pendingCtrlCode)
+	return h.keyDown(h.pendingCtrlCode)
+}
+
+func (h *Handler) keyDown(code uint16) error {
+	if h.heldKeys == nil {
+		h.heldKeys = make(map[uint16]struct{})
+	}
+	// A failed SYN_REPORT can leave the preceding key event applied.
+	h.heldKeys[code] = struct{}{}
+	return h.Keyboard.KeyDown(code)
+}
+
+func (h *Handler) keyUp(code uint16) error {
+	if err := h.Keyboard.KeyUp(code); err != nil {
+		return err
+	}
+	delete(h.heldKeys, code)
+	return nil
+}
+
+func (h *Handler) buttonDown(button uint16) error {
+	if h.heldButtons == nil {
+		h.heldButtons = make(map[uint16]struct{})
+	}
+	h.heldButtons[button] = struct{}{}
+	return h.Mouse.ButtonDown(button)
+}
+
+func (h *Handler) buttonUp(button uint16) error {
+	if err := h.Mouse.ButtonUp(button); err != nil {
+		return err
+	}
+	delete(h.heldButtons, button)
+	return nil
+}
+
+// ResetInput releases injected input and discards connection-scoped state.
+// Like HandlePacket, it must only be called by the receive-loop goroutine.
+// Failed releases remain tracked so a later reset can retry them.
+func (h *Handler) ResetInput() error {
+	h.pendingCtrl = false
+	h.pendingCtrlCode = 0
+	h.suppressCtrlUp = false
+	h.ActivatedAt = nil
+	h.inSeeded = false
+
+	var err error
+	for code := range h.heldKeys {
+		if releaseErr := h.keyUp(code); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("release key %d: %w", code, releaseErr))
+		}
+	}
+	for button := range h.heldButtons {
+		if releaseErr := h.buttonUp(button); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("release button %d: %w", button, releaseErr))
+		}
+	}
+	return err
 }
 
 func (h *Handler) keyCodeForPacket(kd protocol.KeyboardData) (uint16, bool) {
@@ -295,11 +359,11 @@ func (h *Handler) handlePendingCtrl(vk, flags int32, keyCode uint16, isUp bool) 
 		if isUp {
 			if h.pendingCtrl {
 				h.pendingCtrl = false
-				if err := h.Keyboard.KeyDown(keyCode); err != nil {
+				if err := h.keyDown(keyCode); err != nil {
 					slog.Error("keyboard input error", "err", err)
 					return true
 				}
-				if err := h.Keyboard.KeyUp(keyCode); err != nil {
+				if err := h.keyUp(keyCode); err != nil {
 					slog.Error("keyboard input error", "err", err)
 				}
 				return true

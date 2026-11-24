@@ -2,7 +2,9 @@
 package network
 
 import (
+	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/lucky-verma/mwb-linux/internal/input"
@@ -45,6 +47,180 @@ func (m *MockInputDevice) KeyDown(code uint16) error {
 func (m *MockInputDevice) KeyUp(code uint16) error {
 	m.KeyUps = append(m.KeyUps, code)
 	return nil
+}
+
+func keyboardPacket(vk, flags int32) *protocol.Packet {
+	return &protocol.Packet{
+		Type:     protocol.Keyboard,
+		Keyboard: protocol.KeyboardData{WVk: vk, DwFlags: flags},
+	}
+}
+
+func mouseButtonPacket(flags, button int32) *protocol.Packet {
+	return &protocol.Packet{
+		Type:  protocol.Mouse,
+		Mouse: protocol.MouseData{DwFlags: flags, WheelDelta: button},
+	}
+}
+
+func TestResetInputReleasesHeldInput(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	h.HandlePacket(keyboardPacket(0x5B, 0)) // Left Super; its key-up never arrives.
+	h.HandlePacket(keyboardPacket(0x4C, 0))
+	h.HandlePacket(keyboardPacket(0x4C, 0)) // Repeat must still be injected.
+	h.HandlePacket(keyboardPacket(0x41, 0))
+	h.HandlePacket(keyboardPacket(0x41, protocol.LLKHF_UP))
+	h.HandlePacket(keyboardPacket(0xA2, 0)) // Flushed before the mouse packet.
+	for _, pkt := range []*protocol.Packet{
+		mouseButtonPacket(protocol.WM_LBUTTONDOWN, 0),
+		mouseButtonPacket(protocol.WM_LBUTTONDOWN, 0),
+		mouseButtonPacket(protocol.WM_RBUTTONDOWN, 0),
+		mouseButtonPacket(protocol.WM_MBUTTONDOWN, 0),
+		mouseButtonPacket(protocol.WM_XBUTTONDOWN, 1),
+		mouseButtonPacket(protocol.WM_XBUTTONDOWN, 2),
+		mouseButtonPacket(protocol.WM_RBUTTONUP, 0),
+	} {
+		h.HandlePacket(pkt)
+	}
+
+	if err := h.ResetInput(); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(mock.KeyUps)
+	wantKeys := []uint16{input.KEY_A, input.KEY_L, input.KEY_LEFTMETA, input.KEY_LEFTCTRL}
+	slices.Sort(wantKeys)
+	if !reflect.DeepEqual(mock.KeyUps, wantKeys) {
+		t.Errorf("KeyUps = %v, want %v", mock.KeyUps, wantKeys)
+	}
+	slices.Sort(mock.ButtonUps)
+	wantButtons := []uint16{input.BTN_LEFT, input.BTN_RIGHT, input.BTN_MIDDLE, input.BTN_SIDE, input.BTN_EXTRA}
+	slices.Sort(wantButtons)
+	if !reflect.DeepEqual(mock.ButtonUps, wantButtons) {
+		t.Errorf("ButtonUps = %v, want %v", mock.ButtonUps, wantButtons)
+	}
+	if count := len(mock.KeyDowns); count != 5 {
+		t.Errorf("KeyDowns count = %d, want 5 (including repeat and deferred Ctrl)", count)
+	}
+	if err := h.ResetInput(); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.KeyUps) != len(wantKeys) || len(mock.ButtonUps) != len(wantButtons) {
+		t.Fatal("second reset released already-cleared input")
+	}
+}
+
+func TestHideMouseDiscardsPendingCtrl(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	h.HandlePacket(keyboardPacket(0x5B, 0))
+	h.HandlePacket(mouseButtonPacket(protocol.WM_LBUTTONDOWN, 0))
+	h.HandlePacket(keyboardPacket(0xA2, 0))
+	h.HandlePacket(&protocol.Packet{Type: protocol.HideMouse})
+
+	if want := []uint16{input.KEY_LEFTMETA}; !reflect.DeepEqual(mock.KeyDowns, want) {
+		t.Errorf("KeyDowns = %v, want %v (no pending Ctrl injection)", mock.KeyDowns, want)
+	}
+	if want := []uint16{input.KEY_LEFTMETA}; !reflect.DeepEqual(mock.KeyUps, want) {
+		t.Errorf("KeyUps = %v, want %v", mock.KeyUps, want)
+	}
+	if want := []uint16{input.BTN_LEFT}; !reflect.DeepEqual(mock.ButtonUps, want) {
+		t.Errorf("ButtonUps = %v, want %v", mock.ButtonUps, want)
+	}
+	h.HandlePacket(keyboardPacket(0x41, 0))
+	if want := []uint16{input.KEY_LEFTMETA, input.KEY_A}; !reflect.DeepEqual(mock.KeyDowns, want) {
+		t.Errorf("KeyDowns after reentry = %v, want %v", mock.KeyDowns, want)
+	}
+}
+
+func TestResetInputClearsAltGrSuppression(t *testing.T) {
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	h.HandlePacket(keyboardPacket(0xA2, 0))
+	h.HandlePacket(keyboardPacket(0xA5, protocol.LLKHF_EXTENDED))
+	if err := h.ResetInput(); err != nil {
+		t.Fatal(err)
+	}
+	h.HandlePacket(keyboardPacket(0xA2, protocol.LLKHF_UP))
+	if want := []uint16{input.KEY_RIGHTALT, input.KEY_LEFTCTRL}; !reflect.DeepEqual(mock.KeyUps, want) {
+		t.Errorf("KeyUps = %v, want %v (new Ctrl-up must not be suppressed)", mock.KeyUps, want)
+	}
+}
+
+type failingInputDevice struct {
+	MockInputDevice
+	downErr error
+	upErr   error
+}
+
+func (m *failingInputDevice) KeyDown(code uint16) error {
+	_ = m.MockInputDevice.KeyDown(code)
+	return m.downErr
+}
+
+func (m *failingInputDevice) ButtonDown(button uint16) error {
+	_ = m.MockInputDevice.ButtonDown(button)
+	return m.downErr
+}
+
+func (m *failingInputDevice) KeyUp(code uint16) error {
+	_ = m.MockInputDevice.KeyUp(code)
+	return m.upErr
+}
+
+func (m *failingInputDevice) ButtonUp(button uint16) error {
+	_ = m.MockInputDevice.ButtonUp(button)
+	return m.upErr
+}
+
+func TestResetInputRetriesFailedReleases(t *testing.T) {
+	writeErr := errors.New("input write failed")
+	mock := &failingInputDevice{downErr: writeErr, upErr: writeErr}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	h.HandlePacket(keyboardPacket(0x5B, 0))
+	h.HandlePacket(keyboardPacket(0x4C, 0))
+	h.HandlePacket(mouseButtonPacket(protocol.WM_LBUTTONDOWN, 0))
+	h.HandlePacket(mouseButtonPacket(protocol.WM_RBUTTONDOWN, 0))
+	// Failed normal releases must not discard potentially held state either.
+	h.HandlePacket(keyboardPacket(0x4C, protocol.LLKHF_UP))
+	h.HandlePacket(mouseButtonPacket(protocol.WM_RBUTTONUP, 0))
+	mock.KeyUps, mock.ButtonUps = nil, nil
+
+	if err := h.ResetInput(); !errors.Is(err, writeErr) {
+		t.Fatalf("ResetInput error = %v, want %v", err, writeErr)
+	}
+	if len(mock.KeyUps) != 2 || len(mock.ButtonUps) != 2 {
+		t.Fatalf("cleanup stopped early: key releases=%v, button releases=%v", mock.KeyUps, mock.ButtonUps)
+	}
+
+	mock.upErr = nil
+	if err := h.ResetInput(); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.KeyUps) != 4 || len(mock.ButtonUps) != 4 {
+		t.Fatalf("failed releases were not retried: keys=%v, buttons=%v", mock.KeyUps, mock.ButtonUps)
+	}
+	if err := h.ResetInput(); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.KeyUps) != 4 || len(mock.ButtonUps) != 4 {
+		t.Fatal("successful retries were not cleared")
+	}
+}
+
+func TestResetInputRetriesFailedCtrlTapRelease(t *testing.T) {
+	mock := &failingInputDevice{upErr: errors.New("release failed")}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	h.HandlePacket(keyboardPacket(0xA2, 0))
+	h.HandlePacket(keyboardPacket(0xA2, protocol.LLKHF_UP))
+
+	mock.upErr = nil
+	if err := h.ResetInput(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []uint16{input.KEY_LEFTCTRL, input.KEY_LEFTCTRL}; !reflect.DeepEqual(mock.KeyUps, want) {
+		t.Errorf("KeyUps = %v, want %v (retry the failed Ctrl tap release)", mock.KeyUps, want)
+	}
 }
 
 func TestHandleMouseMove(t *testing.T) {

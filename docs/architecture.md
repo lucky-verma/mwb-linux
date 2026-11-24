@@ -40,6 +40,13 @@ MWB Linux listens and dials at the same time. The first authenticated control
 connection wins, which keeps reconnects quick after either machine sleeps or
 restarts.
 
+All connections for the local machine name share one process-local machine ID
+and packet sequence. PowerToys uses the ID to pair inbound/outbound sockets and
+deduplicates received packet IDs across sockets. Restarting either value for
+each connection can therefore break routing or discard registration heartbeats.
+Closing a losing connection closes only its socket: it must not send `ByeBye`,
+which would announce that the machine itself has departed.
+
 ## Encryption and handshake
 
 The implementation follows the PowerToys MWB protocol for compatibility:
@@ -83,6 +90,14 @@ and dispatch live in `internal/network`.
 PowerToys sends mouse and keyboard packets over the control connection. MWB
 Linux maps Windows virtual-key codes to Linux evdev codes and writes events to
 its `mwb-mouse` and `mwb-keyboard` uinput devices.
+
+The packet handler tracks injected keys and mouse buttons. When the control
+receive loop exits or Windows sends `HideMouse` to move the cursor away, it
+releases held input and discards pending Ctrl/AltGr state. Virtual devices can
+therefore survive reconnects without retaining stale presses from a lost key-up
+or button-up packet. Cleanup attempts every release; failures are reported and
+remain tracked for retry at the next cleanup boundary. This does not detect
+screen locks or guarantee lock-screen wake/input support.
 
 Keyboard packets do not carry hardware scan codes or Unicode text. The
 `keyboard_layout` profile handles common Windows layouts; unknown layouts use
