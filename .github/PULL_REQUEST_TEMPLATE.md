@@ -13,10 +13,10 @@
 
 ### Manual (bidirectional mode)
 - [ ] Cursor crosses to Windows and stays there (doesn't bounce back immediately)
-- [ ] Cursor returns to Ubuntu from Windows right edge
-- [ ] After return: Ubuntu keyboard and mouse work immediately
+- [ ] Cursor returns to Linux from the Windows edge
+- [ ] After return: Linux keyboard and mouse work immediately
 - [ ] After Windows screen lock + unlock: cursor recovers without restart
-- [ ] Clipboard text: copy on Ubuntu, paste on Windows (and reverse)
+- [ ] Clipboard text: copy on Linux, paste on Windows (and reverse)
 
 ### Input isolation safety (required for any capture/ change)
 - [ ] After switch → return: local mouse and keyboard both work again

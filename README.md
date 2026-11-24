@@ -352,6 +352,13 @@ systemctl --user restart mwb
 - Verify the IP address in config.toml
 - Ensure PowerToys MWB is enabled on Windows
 
+### "magic mismatch" in the log
+
+Both sides must use the same security key and the same stream encryption.
+Copy the key from PowerToys again. If Windows runs PowerToys 0.100.2 or older,
+set `legacy_crypto = true` in `config.toml`; on PowerToys 0.101 or newer, remove
+it.
+
 ### Cursor bounces back immediately
 
 Set "Move mouse relatively" to OFF in PowerToys MWB settings.
@@ -361,7 +368,7 @@ Set "Move mouse relatively" to OFF in PowerToys MWB settings.
 Upgrade to a build with directional `MachineSwitched`/`NextMachine` filtering.
 The Linux client should only accept return requests from the edge configured by
 `-edge`; touching the other laptop's far edge should stop there, not bring
-control back to Ubuntu.
+control back to Linux.
 
 ## Project Structure
 

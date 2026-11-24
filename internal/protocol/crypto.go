@@ -2,11 +2,11 @@
 package protocol
 
 import (
+	"crypto/pbkdf2"
 	"crypto/sha512"
 	"encoding/binary"
+	"errors"
 	"fmt"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 const (
@@ -28,7 +28,20 @@ func pbkdf2Salt() []byte {
 
 // DeriveKey derives a 32-byte AES-256 key using PBKDF2-SHA512 with 50,000 iterations.
 func DeriveKey(securityKey string) []byte {
-	return pbkdf2.Key([]byte(securityKey), pbkdf2Salt(), pbkdf2Iter, aesKeySize, sha512.New)
+	return pbkdf2SHA512(securityKey, pbkdf2Salt(), pbkdf2Iter)
+}
+
+// pbkdf2SHA512 derives an AES-256 key with the standard library's PBKDF2.
+// pbkdf2.Key fails only for a non-positive key length or, in FIPS 140-only
+// mode, for keys under 112 bits, salts under 128 bits or non-SHA-2/3 hashes.
+// Every caller passes a 32-byte key length, SHA-512 and a salt of at least
+// SaltSize bytes, so an error here is a programming error.
+func pbkdf2SHA512(password string, salt []byte, iter int) []byte {
+	key, err := pbkdf2.Key(sha512.New, password, salt, iter, aesKeySize)
+	if err != nil {
+		panic("protocol: PBKDF2 rejected fixed parameters: " + err.Error())
+	}
+	return key
 }
 
 // FixedIV returns the 16-byte IV for AES-CBC (ASCII "1844674407370955").
@@ -70,12 +83,18 @@ func StampPacket(buf []byte, magic uint32) {
 	}
 }
 
+// ErrMagicMismatch marks a packet whose security-key magic is not ours. Either
+// the two sides hold different security keys, or the stream is encrypted under
+// the other PowerToys scheme and decrypts to noise; the bytes cannot tell
+// these apart.
+var ErrMagicMismatch = errors.New("magic mismatch")
+
 // ValidatePacket checks the magic number and checksum.
 func ValidatePacket(buf []byte, magic uint32) error {
 	wireMagic := uint32(buf[3])<<24 + uint32(buf[2])<<16
 	expectedMagic := magic & 0xFFFF0000
 	if wireMagic != expectedMagic {
-		return fmt.Errorf("magic mismatch: wire=0x%08X expected=0x%08X", wireMagic, expectedMagic)
+		return fmt.Errorf("%w: wire=0x%08X expected=0x%08X", ErrMagicMismatch, wireMagic, expectedMagic)
 	}
 	var checksum byte
 	for i := 2; i < PacketSize; i++ {
@@ -115,5 +134,5 @@ const (
 // DeriveKeyWithSalt derives a 32-byte AES-256 key from the security key and a
 // per-connection salt, mirroring PowerToys' Encryption.GenLegalKey(salt).
 func DeriveKeyWithSalt(securityKey string, salt []byte) []byte {
-	return pbkdf2.Key([]byte(securityKey), salt, pbkdf2IterV2, aesKeySize, sha512.New)
+	return pbkdf2SHA512(securityKey, salt, pbkdf2IterV2)
 }
