@@ -3,6 +3,8 @@ package protocol
 
 import (
 	"bytes"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -94,6 +96,23 @@ func TestChecksumAndMagic(t *testing.T) {
 	buf[15] ^= 0xFF
 	if err := ValidatePacket(buf, magic); err == nil {
 		t.Error("validation should fail after corruption")
+	}
+}
+
+// TestValidatePacketMagicMismatchIsSentinel keeps the wrong-key case
+// identifiable: the network layer matches ErrMagicMismatch to tell the user
+// which setting to check (issue #53), so the message alone is not enough.
+func TestValidatePacketMagicMismatchIsSentinel(t *testing.T) {
+	p := &Packet{Type: Handshake, ID: 1, Src: 1, Des: 2}
+	buf := p.Marshal()
+	StampPacket(buf, Get24BitHash("KeyOnWindows1234"))
+
+	err := ValidatePacket(buf, Get24BitHash("KeyOnLinux567890"))
+	if !errors.Is(err, ErrMagicMismatch) {
+		t.Fatalf("ValidatePacket with a different key = %v, want ErrMagicMismatch", err)
+	}
+	if !strings.HasPrefix(err.Error(), "magic mismatch: wire=0x") {
+		t.Errorf("error text changed to %q; users search for the old wording", err)
 	}
 }
 

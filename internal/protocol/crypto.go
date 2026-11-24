@@ -4,6 +4,7 @@ package protocol
 import (
 	"crypto/sha512"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -70,12 +71,18 @@ func StampPacket(buf []byte, magic uint32) {
 	}
 }
 
+// ErrMagicMismatch marks a packet whose security-key magic is not ours. Either
+// the two sides hold different security keys, or the stream is encrypted under
+// the other PowerToys scheme and decrypts to noise; the bytes cannot tell
+// these apart.
+var ErrMagicMismatch = errors.New("magic mismatch")
+
 // ValidatePacket checks the magic number and checksum.
 func ValidatePacket(buf []byte, magic uint32) error {
 	wireMagic := uint32(buf[3])<<24 + uint32(buf[2])<<16
 	expectedMagic := magic & 0xFFFF0000
 	if wireMagic != expectedMagic {
-		return fmt.Errorf("magic mismatch: wire=0x%08X expected=0x%08X", wireMagic, expectedMagic)
+		return fmt.Errorf("%w: wire=0x%08X expected=0x%08X", ErrMagicMismatch, wireMagic, expectedMagic)
 	}
 	var checksum byte
 	for i := 2; i < PacketSize; i++ {

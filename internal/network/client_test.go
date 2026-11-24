@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -283,5 +284,116 @@ func TestSecureStreamCurrentMode(t *testing.T) {
 	}
 	if err := <-peerDone; err != nil {
 		t.Fatalf("peer secure stream: %v", err)
+	}
+}
+
+// TestSchemeMismatchIsMagicMismatch pins the symptom behind issue #53. When
+// one side speaks the pre-0.101 PowerToys scheme and the other the current one,
+// the current side takes the first ciphertext as a salt+IV header (or the
+// legacy side decrypts that header as ciphertext), and the first packet comes
+// out as noise. That must surface as ErrMagicMismatch, because the legacy_crypto
+// hint is keyed on it. The peer's plaintext is fixed and only the peer's bytes
+// are decrypted, so the result does not depend on chance.
+func TestSchemeMismatchIsMagicMismatch(t *testing.T) {
+	const securityKey = "TestSecurityKey!!"
+
+	tests := []struct {
+		name       string
+		linuxOld   bool
+		peerStream func(io.Writer) (*protocol.EncryptWriter, error)
+	}{
+		{
+			name: "current Linux, PowerToys before 0.101",
+			peerStream: func(w io.Writer) (*protocol.EncryptWriter, error) {
+				return protocol.NewEncryptWriter(w, protocol.DeriveKey(securityKey), protocol.FixedIV())
+			},
+		},
+		{
+			name:     "legacy_crypto Linux, PowerToys 0.101 or newer",
+			linuxOld: true,
+			peerStream: func(w io.Writer) (*protocol.EncryptWriter, error) {
+				return protocol.NewEncryptWriterWithHeader(w, securityKey)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			SetLegacyCrypto(tt.linuxOld)
+			t.Cleanup(func() { SetLegacyCrypto(false) })
+
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = ln.Close() }()
+
+			peerDone := make(chan error, 1)
+			go func() {
+				raw, err := ln.Accept()
+				if err != nil {
+					peerDone <- err
+					return
+				}
+				defer func() { _ = raw.Close() }()
+				enc, err := tt.peerStream(raw)
+				if err != nil {
+					peerDone <- err
+					return
+				}
+				// Write errors are expected once the client has read enough
+				// to fail and hung up, so only setup errors are reported.
+				defer func() { peerDone <- nil }()
+				if _, err := enc.Write(make([]byte, 16)); err != nil {
+					return
+				}
+				magic := protocol.Get24BitHash(securityKey)
+				for i := int32(1); i <= 10; i++ {
+					p := &protocol.Packet{Type: protocol.Handshake, ID: i, Src: 7, Des: protocol.IDAll}
+					buf := p.Marshal()
+					protocol.StampPacket(buf, magic)
+					if _, err := enc.Write(buf); err != nil {
+						return
+					}
+				}
+				// Hold the socket open until the client is done reading.
+				_, _ = io.Copy(io.Discard, raw)
+			}()
+
+			raw, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := newSecureStream(raw, securityKey, "linux", 5*time.Second)
+			if err != nil {
+				_ = raw.Close()
+				t.Fatalf("secure stream setup: %v", err)
+			}
+			_, err = c.RecvPacket()
+			_ = raw.Close()
+			if !errors.Is(err, protocol.ErrMagicMismatch) {
+				t.Fatalf("first packet = %v, want ErrMagicMismatch", err)
+			}
+			if err := <-peerDone; err != nil {
+				t.Fatalf("peer: %v", err)
+			}
+		})
+	}
+}
+
+// TestMagicMismatchHintNamesTheFix checks that the hint points each mode at the
+// setting that would fix it, since a wrong key and a wrong scheme look the same.
+func TestMagicMismatchHintNamesTheFix(t *testing.T) {
+	current := magicMismatchHint(false)
+	for _, want := range []string{"key", "legacy_crypto = true", "0.100.2"} {
+		if !strings.Contains(current, want) {
+			t.Errorf("current-mode hint %q does not mention %q", current, want)
+		}
+	}
+	legacy := magicMismatchHint(true)
+	for _, want := range []string{"key", "legacy_crypto", "0.101"} {
+		if !strings.Contains(legacy, want) {
+			t.Errorf("legacy-mode hint %q does not mention %q", legacy, want)
+		}
 	}
 }
