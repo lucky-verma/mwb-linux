@@ -228,6 +228,15 @@ func main() {
 				slog.Info("connected (inbound)", "remote", conn.RemoteName)
 			}
 			close(connectStop)
+			// PowerToys can complete a second connection while this one is
+			// active and sends every packet on both. Drain it for this
+			// session and close it after; never start a session on it.
+			dupStop := make(chan struct{})
+			dupDone := make(chan struct{})
+			go func() {
+				network.DrainDuplicates(incomingCh, dupStop)
+				close(dupDone)
+			}()
 			activeMachineID.Store(conn.MachineID)
 			handler.OnBecameActive = nil
 			handler.OnActivated = nil
@@ -317,6 +326,8 @@ func main() {
 			}
 			activeMachineID.CompareAndSwap(conn.MachineID, 0)
 
+			close(dupStop)
+			<-dupDone
 			_ = conn.Close()
 			slog.Info("disconnected, reconnecting")
 		}
