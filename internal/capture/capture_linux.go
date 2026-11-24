@@ -917,7 +917,7 @@ func (c *Capturer) handleRel(ev inputEvent) {
 
 	if switchBack {
 		remY := c.remoteY
-		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
+		slog.Info("remote edge hit — switching back to local", "remoteX", c.remoteX, "remoteY", remY)
 		c.active = true
 		onActivated := c.OnActivated
 		c.switchSent = time.Time{}
@@ -954,10 +954,10 @@ func (c *Capturer) handleKey(ev inputEvent) {
 	if ev.Code == 56 || ev.Code == 100 {
 		c.hotkeyAlt = ev.Value == 1
 	}
-	// Ctrl+Alt+Right = force return to Ubuntu
+	// Ctrl+Alt+Right = force return to the local machine
 	if ev.Code == 106 && ev.Value == 1 && c.hotkeyCtrl && c.hotkeyAlt {
 		if !c.IsActive() {
-			slog.Info("hotkey Ctrl+Alt+Right: returning to Ubuntu")
+			slog.Info("hotkey Ctrl+Alt+Right: returning to local")
 			c.SetActive(true)
 			return
 		}

@@ -361,7 +361,7 @@ Set "Move mouse relatively" to OFF in PowerToys MWB settings.
 Upgrade to a build with directional `MachineSwitched`/`NextMachine` filtering.
 The Linux client should only accept return requests from the edge configured by
 `-edge`; touching the other laptop's far edge should stop there, not bring
-control back to Ubuntu.
+control back to Linux.
 
 ## Project Structure
 
