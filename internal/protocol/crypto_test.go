@@ -3,6 +3,7 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -139,5 +140,30 @@ func TestDeriveKeyWithSalt(t *testing.T) {
 	// So must a different security key.
 	if bytes.Equal(key1, DeriveKeyWithSalt("DifferentKey12345", salt1)) {
 		t.Error("different security keys produced the same key")
+	}
+}
+
+// TestDeriveKeyKnownAnswers pins both PBKDF2 schemes to fixed outputs, so a
+// change of implementation cannot silently change the keys PowerToys expects.
+// The expected values were cross-checked with Python's hashlib.pbkdf2_hmac.
+func TestDeriveKeyKnownAnswers(t *testing.T) {
+	salt := make([]byte, SaltSize)
+	for i := range salt {
+		salt[i] = byte(i)
+	}
+	tests := []struct {
+		name string
+		got  []byte
+		want string
+	}{
+		{"legacy fixed salt, 50k", DeriveKey("TestSecurityKey!!"),
+			"92b7fc2b9686a3a0243a3e99b13c51ca84c4e907bc9e221bb5a7bfd353f6f2f3"},
+		{"per-connection salt, 100k", DeriveKeyWithSalt("TestSecurityKey!!", salt),
+			"5fca849920ece2fda0ff99537f580508fae95b9466c9bb4e52984093623984bc"},
+	}
+	for _, tt := range tests {
+		if got := hex.EncodeToString(tt.got); got != tt.want {
+			t.Errorf("%s: key = %s, want %s", tt.name, got, tt.want)
+		}
 	}
 }
