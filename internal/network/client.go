@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -57,6 +58,31 @@ var legacyCrypto atomic.Bool
 // before opening any connection; it is not meant to change at runtime.
 func SetLegacyCrypto(on bool) {
 	legacyCrypto.Store(on)
+}
+
+var magicMismatchOnce sync.Once
+
+// warnMagicMismatch explains a magic mismatch once per process. The error by
+// itself names no setting, and its two usual causes need different fixes: a
+// key that differs from the PowerToys security key, or a stream scheme that
+// does not match the peer's PowerToys version (issue #53).
+func warnMagicMismatch(err error) {
+	if !errors.Is(err, protocol.ErrMagicMismatch) {
+		return
+	}
+	magicMismatchOnce.Do(func() {
+		slog.Warn("cannot decrypt packets from the Windows peer",
+			"hint", magicMismatchHint(legacyCrypto.Load()))
+	})
+}
+
+func magicMismatchHint(legacy bool) string {
+	if legacy {
+		return "check that key matches the PowerToys security key; " +
+			"legacy_crypto = true is set, so remove it if Windows runs PowerToys 0.101 or newer"
+	}
+	return "check that key matches the PowerToys security key; " +
+		"if Windows runs PowerToys 0.100.2 or older, set legacy_crypto = true in config.toml"
 }
 
 // resetKeyCacheLocked drops cached material when the security key changes.
@@ -277,6 +303,7 @@ func connectWithRetry(
 			}
 
 			slog.Debug("outbound connect failed; retrying", "err", err, "delay", retryDelay)
+			warnMagicMismatch(err)
 			timer := time.NewTimer(retryDelay)
 			select {
 			case <-timer.C:
@@ -485,6 +512,7 @@ func ListenAndAccept(port int, securityKey, machineName, allowedHost string, onF
 				first, err := conn.RecvPacket()
 				if err != nil {
 					slog.Error("incoming first packet failed", "remote", raw.RemoteAddr(), "err", err)
+					warnMagicMismatch(err)
 					_ = raw.Close()
 					return
 				}

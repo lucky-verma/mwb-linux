@@ -352,6 +352,13 @@ systemctl --user restart mwb
 - Verify the IP address in config.toml
 - Ensure PowerToys MWB is enabled on Windows
 
+### "magic mismatch" in the log
+
+Both sides must use the same security key and the same stream encryption.
+Copy the key from PowerToys again. If Windows runs PowerToys 0.100.2 or older,
+set `legacy_crypto = true` in `config.toml`; on PowerToys 0.101 or newer, remove
+it.
+
 ### Cursor bounces back immediately
 
 Set "Move mouse relatively" to OFF in PowerToys MWB settings.
